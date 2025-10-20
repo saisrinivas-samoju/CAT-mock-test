@@ -1010,10 +1010,15 @@ class CATMockTestApp {
 
     // Session Management
     async saveSession() {
-        if (!this.currentSession) return;
+        if (!this.currentSession) {
+            console.log('No current session to save');
+            return;
+        }
+        
+        console.log('Attempting to save session:', this.currentSession);
         
         try {
-            await fetch('/api/save-session', {
+            const response = await fetch('/api/save-session', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
@@ -1022,8 +1027,19 @@ class CATMockTestApp {
                     session_id: this.currentSession
                 })
             });
+            
+            console.log('Save session response status:', response.status);
+            
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(`Save failed: ${errorData.detail || response.statusText}`);
+            }
+            
+            const result = await response.json();
+            console.log('Save session result:', result);
         } catch (error) {
             console.error('Error saving session:', error);
+            throw error; // Re-throw to allow proper error handling in submitTest
         }
     }
 
@@ -1057,8 +1073,13 @@ class CATMockTestApp {
     }
 
     async saveTest() {
-        await this.saveSession();
-        this.showToast('Test progress saved successfully!', 'success');
+        try {
+            await this.saveSession();
+            this.showToast('Test progress saved successfully!', 'success');
+        } catch (error) {
+            console.error('Error saving test:', error);
+            this.showToast('Failed to save test progress', 'error');
+        }
     }
 
     async submitTest() {
@@ -1085,9 +1106,17 @@ class CATMockTestApp {
             
             try {
                 await Promise.race([savePromise, timeoutPromise]);
+                console.log('Session saved successfully before submission');
             } catch (error) {
-                console.warn('Save session timeout, proceeding with submit:', error);
-                // Continue with submission even if save times out
+                console.error('Save session failed:', error);
+                this.showToast('Failed to save test progress. Submission cancelled.', 'error');
+                
+                // Re-enable submit button
+                submitButtons.forEach(btn => {
+                    btn.disabled = false;
+                    btn.innerHTML = '<i class="fas fa-paper-plane"></i> Submit';
+                });
+                return; // Stop submission if save fails
             }
             
             // Calculate results
