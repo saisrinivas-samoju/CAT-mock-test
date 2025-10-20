@@ -803,6 +803,10 @@ async def get_user_progress(username: str):
 # Mount static files
 app.mount("/static", StaticFiles(directory="frontend"), name="static")
 
+# Vercel handler
+def handler(request):
+    return app(request)
+
 @app.get("/api/ai-analysis/{username}")
 async def get_ai_analysis(username: str):
     """Get AI-powered performance analysis for a user"""
