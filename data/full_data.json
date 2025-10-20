@@ -240,6 +240,24 @@
                     "context": "",
                     "qa_list": [
                         {
+                            "question": "<p>Which one of the following statements about art best captures the arguments made in the passage?</p>",
+                            "question_type": "Multiple Choice Question",
+                            "options": [
+                                "<p>a) As art is increasingly created, stored and distributed digitally, access to it is counterintuitively likely to be made more difficult by the rapid churn in technology and the whims of host platforms.</p>",
+                                "<p>b) In the age of online subscription services, it is time to change our understanding of classic works of art being primarily immutable and easily available to the public.</p>",
+                                "<p>c) Accepting retroactive changes to works of art is dangerous because it will encourage creators to not put enough effort into the original attempt, given that they can always edit or update their work later.</p>",
+                                "<p>d) Works of art belong to the cultural commons and hence must remain available in perpetuity, irrespective of who pays for access to them.</p>"
+                            ],
+                            "answer": "a",
+                            "solution": "<p>The passage argues that as art is increasingly created, stored, and distributed digitally, access to it is likely to become more difficult due to rapid technological changes and the whims of host platforms. This is contrary to the expectation that digital technology would make art more accessible. Option (a) best captures this argument by highlighting the counterintuitive difficulty in accessing art in the digital age.</p>",
+                            "question_num": 16
+                        }
+                    ]
+                },
+                {
+                    "context": "",
+                    "qa_list": [
+                        {
                             "question": "Which of the following statements is suggested by the sentence \"Back then, at least, cinema was defined by its ephemerality: the sense that a film was as good as gone once it left your local cinema\"?",
                             "question_type": "Multiple Choice Question",
                             "options": [
@@ -250,9 +268,7 @@
                             ],
                             "answer": "d",
                             "solution": "<p>The sentence \"Back then, at least, cinema was defined by its ephemerality: the sense that a film was as good as gone once it left your local cinema\" suggests that in the past, films were considered ephemeral because they were only available for viewing during their run in local cinemas. Once a film's run ended, it was no longer accessible to the audience, creating a sense of transience. This contrasts with the present situation where films are expected to be available for a longer duration due to advancements in technology and distribution methods, such as streaming services and home video, which allow films to be accessed long after their initial cinema release. Therefore, the correct option is 'd) Today, films are expected to be available for a long time, since they are no longer tied solely to their stay at the local cinema.'</p>",
-                            "question_num": [
-                                17
-                            ]
+                            "question_num": 17
                         }
                     ]
                 },
