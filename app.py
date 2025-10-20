@@ -271,9 +271,10 @@ async def save_session_data(session_id: str):
                 with pd.ExcelWriter(excel_file, engine='openpyxl') as writer:
                     df.to_excel(writer, sheet_name=sheet_name, index=False)
             
-            pass  # Progress saved successfully
+            print(f"Successfully saved Excel file for {username}")
         except Exception as e:
             print(f"Error saving Excel file for {username}: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to save progress: {str(e)}")
 
 # API Routes
 
@@ -974,8 +975,8 @@ Guidelines:
 """
         
         # Use the AI analyzer to get response
-        from langchain.prompts import ChatPromptTemplate
-        from langchain.schema.output_parser import StrOutputParser
+        from langchain_core.prompts import ChatPromptTemplate
+        from langchain_core.output_parsers import StrOutputParser
         
         prompt = ChatPromptTemplate.from_template(followup_prompt)
         chain = prompt | ai_analyzer.llm | StrOutputParser()
