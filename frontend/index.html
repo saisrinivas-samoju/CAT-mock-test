@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CAT Mock Test Portal</title>
+    <link rel="stylesheet" href="static/styles.css">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <script>
+        // Configure MathJax before loading
+        window.MathJax = {
+            tex: {
+                inlineMath: [['\\(', '\\)']],
+                displayMath: [['\\[', '\\]']]
+            },
+            startup: {
+                ready() {
+                    console.log('MathJax is loaded and ready');
+                    MathJax.startup.defaultReady();
+                }
+            }
+        };
+    </script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/3.2.2/es5/tex-mml-chtml.js"></script>
+</head>
+<body>
+    <!-- Login/Signup Page -->
+    <div id="authPage" class="page active">
+        <div class="auth-container">
+            <div class="auth-header">
+                <h1><i class="fas fa-graduation-cap"></i> CAT Mock Test Portal</h1>
+                <p>Your comprehensive CAT exam preparation platform</p>
+            </div>
+            
+            <div class="auth-tabs">
+                <button class="tab-btn active" onclick="switchTab('login')">Login</button>
+                <button class="tab-btn" onclick="switchTab('signup')">Sign Up</button>
+            </div>
+            
+            <!-- Login Form -->
+            <div id="loginForm" class="auth-form active">
+                <h2>Welcome Back!</h2>
+                <form onsubmit="handleLogin(event)">
+                    <div class="form-group">
+                        <label for="loginUsername">Username</label>
+                        <input type="text" id="loginUsername" placeholder="Enter your username" required>
+                    </div>
+                    <button type="submit" class="auth-btn">
+                        <i class="fas fa-sign-in-alt"></i> Login
+                    </button>
+                </form>
+            </div>
+            
+            <!-- Signup Form -->
+            <div id="signupForm" class="auth-form">
+                <h2>Create Account</h2>
+                <form onsubmit="handleSignup(event)">
+                    <div class="form-group">
+                        <label for="signupName">Full Name</label>
+                        <input type="text" id="signupName" placeholder="Enter your full name" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="signupUsername">Username</label>
+                        <input type="text" id="signupUsername" placeholder="Choose a unique username" required minlength="3" maxlength="20">
+                    </div>
+                    <button type="submit" class="auth-btn">
+                        <i class="fas fa-user-plus"></i> Sign Up
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Dashboard Page -->
+    <div id="dashboardPage" class="page">
+        <div class="dashboard-container">
+            <header class="dashboard-header">
+                <div class="user-info">
+                    <i class="fas fa-user-circle"></i>
+                    <span id="userGreeting">Welcome!</span>
+                </div>
+                <button class="logout-btn" onclick="logout()">
+                    <i class="fas fa-sign-out-alt"></i> Logout
+                </button>
+            </header>
+            
+            <div class="dashboard-content">
+                <div class="dashboard-title">
+                    <h1><i class="fas fa-clipboard-list"></i> Available Tests</h1>
+                    <p>Choose a test to begin your CAT preparation</p>
+                </div>
+                
+                <div id="testsList" class="tests-grid">
+                    <!-- Tests will be loaded here -->
+                </div>
+                
+                <div class="user-stats">
+                    <h2><i class="fas fa-chart-line"></i> Your Progress</h2>
+                    <div class="stats-grid">
+                        <div class="stat-card">
+                            <i class="fas fa-clock"></i>
+                            <span class="stat-number" id="totalTime">0h 0m</span>
+                            <span class="stat-label">Total Time</span>
+                        </div>
+                        <div class="stat-card">
+                            <i class="fas fa-check-circle"></i>
+                            <span class="stat-number" id="testsCompleted">0</span>
+                            <span class="stat-label">Tests Completed</span>
+                        </div>
+                        <div class="stat-card">
+                            <i class="fas fa-percentage"></i>
+                            <span class="stat-number" id="avgScore">0%</span>
+                            <span class="stat-label">Average Score</span>
+                        </div>
+                    </div>
+                    <button class="download-btn" onclick="downloadProgress()">
+                        <i class="fas fa-download"></i> Download Progress Report
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Test Interface Page -->
+    <div id="testPage" class="page">
+        <div class="test-container">
+            <!-- Test Header -->
+            <header class="test-header">
+                <div class="test-info">
+                    <span id="testName">CAT Mock Test</span>
+                    <span id="currentSection">VARC</span>
+                </div>
+                <div class="test-timer">
+                    <i class="fas fa-clock"></i>
+                    <span id="timeRemaining">02:00:00</span>
+                </div>
+                <div class="test-controls">
+                    <button class="control-btn" onclick="pauseTest()">
+                        <i class="fas fa-pause"></i> Pause
+                    </button>
+                    <button class="control-btn" onclick="saveTest()">
+                        <i class="fas fa-save"></i> Save
+                    </button>
+                    <button class="control-btn danger" onclick="submitTest()">
+                        <i class="fas fa-paper-plane"></i> Submit
+                    </button>
+                </div>
+            </header>
+            
+            <div class="test-body">
+                <!-- Question Palette Sidebar -->
+                <aside class="question-palette">
+                    <div class="palette-header">
+                        <h3>Question Palette</h3>
+                        <div class="section-tabs">
+                            <button class="section-tab active" onclick="switchSection('VARC')">VARC</button>
+                            <button class="section-tab" onclick="switchSection('DILR')">DILR</button>
+                            <button class="section-tab" onclick="switchSection('QA')">QA</button>
+                        </div>
+                    </div>
+                    <div class="palette-legend">
+                        <div class="legend-item">
+                            <span class="legend-dot answered"></span>
+                            <span>Answered</span>
+                        </div>
+                        <div class="legend-item">
+                            <span class="legend-dot not-visited"></span>
+                            <span>Not Visited</span>
+                        </div>
+                        <div class="legend-item">
+                            <span class="legend-dot not-answered"></span>
+                            <span>Not Answered</span>
+                        </div>
+                        <div class="legend-item">
+                            <span class="legend-dot bookmarked"></span>
+                            <span>Bookmarked</span>
+                        </div>
+                    </div>
+                    <div id="paletteQuestions" class="palette-questions">
+                        <!-- Question buttons will be generated here -->
+                    </div>
+                </aside>
+                
+                <!-- Main Question Area -->
+                <main class="question-area">
+                    <div class="question-header">
+                        <div class="question-nav">
+                            <button class="nav-btn" onclick="previousQuestion()" disabled>
+                                <i class="fas fa-chevron-left"></i> Previous
+                            </button>
+                            <span id="questionNumber">Question 1 of 24</span>
+                            <button class="nav-btn" onclick="nextQuestion()">
+                                Next <i class="fas fa-chevron-right"></i>
+                            </button>
+                        </div>
+                        <div class="question-actions">
+                            <button class="action-btn" onclick="toggleBookmark()" id="bookmarkBtn">
+                                <i class="far fa-bookmark"></i> Bookmark
+                            </button>
+                            <div class="flag-dropdown">
+                                <button class="action-btn" onclick="toggleFlagMenu()">
+                                    <i class="fas fa-flag"></i> Flag <i class="fas fa-chevron-down"></i>
+                                </button>
+                                <div class="flag-menu" id="flagMenu">
+                                    <button onclick="setFlag('red')"><span class="flag-color red"></span> Review Later</button>
+                                    <button onclick="setFlag('yellow')"><span class="flag-color yellow"></span> Uncertain</button>
+                                    <button onclick="setFlag('green')"><span class="flag-color green"></span> Confident</button>
+                                    <button onclick="setFlag('none')">Remove Flag</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="question-content">
+                        <div id="questionContext" class="context-area">
+                            <!-- Context/passage content will be loaded here -->
+                        </div>
+                        
+                        <div id="questionBody" class="question-body">
+                            <div class="question-text">
+                                <!-- Question text will be loaded here -->
+                            </div>
+                            
+                            <div class="answer-options" id="answerOptions">
+                                <!-- Answer options will be generated here -->
+                            </div>
+                        </div>
+                    </div>
+                </main>
+            </div>
+        </div>
+    </div>
+
+    <!-- Results Page -->
+    <div id="resultsPage" class="page">
+        <div class="results-container">
+            <div class="results-header">
+                <h1><i class="fas fa-chart-bar"></i> Test Results</h1>
+                <p id="testCompletionMsg">Congratulations! You have completed the test.</p>
+            </div>
+            
+            <div class="results-grid">
+                <div class="result-card">
+                    <h3>Overall Score</h3>
+                    <div class="score-display">
+                        <span id="totalScore">0</span>
+                        <span class="score-max">/ 198</span>
+                    </div>
+                </div>
+                
+                <div class="result-card">
+                    <h3>Section-wise Performance</h3>
+                    <div class="section-scores">
+                        <div class="section-score">
+                            <span>VARC</span>
+                            <span id="varcScore">0/72</span>
+                        </div>
+                        <div class="section-score">
+                            <span>DILR</span>
+                            <span id="dilrScore">0/60</span>
+                        </div>
+                        <div class="section-score">
+                            <span>QA</span>
+                            <span id="qaScore">0/66</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="result-card">
+                    <h3>Accuracy</h3>
+                    <div class="accuracy-display">
+                        <span id="accuracyPercent">0%</span>
+                    </div>
+                </div>
+                
+                <div class="result-card">
+                    <h3>Time Analysis</h3>
+                    <div class="time-analysis">
+                        <div>Total Time: <span id="totalTimeSpent">00:00:00</span></div>
+                        <div>Avg per Question: <span id="avgTimePerQ">00:00</span></div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="ai-analysis" id="aiAnalysis">
+                <h2><i class="fas fa-robot"></i> AI Performance Analysis</h2>
+                <div class="analysis-content">
+                    <div style="text-align: center; padding: 2rem; color: var(--text-color);">
+                        <i class="fas fa-robot" style="font-size: 2rem; color: var(--primary-color); margin-bottom: 1rem;"></i>
+                        <p>Click "Get AI Feedback" below to generate personalized analysis and improvement recommendations.</p>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="results-actions">
+                <button class="action-btn primary" onclick="generateAIFeedback()">
+                    <i class="fas fa-brain"></i> Get AI Feedback
+                </button>
+                <button class="action-btn" onclick="downloadResults()">
+                    <i class="fas fa-download"></i> Download Report
+                </button>
+                <button class="action-btn" onclick="returnToDashboard()">
+                    <i class="fas fa-home"></i> Back to Dashboard
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Loading overlay -->
+    <div id="loadingOverlay" class="loading-overlay">
+        <div class="loading-spinner">
+            <i class="fas fa-spinner fa-spin"></i>
+            <p>Loading...</p>
+        </div>
+    </div>
+
+    <!-- Toast notifications -->
+    <div id="toastContainer" class="toast-container"></div>
+
+    <script src="static/app.js"></script>
+</body>
+</html>
