@@ -13,3 +13,4 @@ wheels/
 # Specific files to ignore
 **/.DS_Store
 .env
+archive/**
