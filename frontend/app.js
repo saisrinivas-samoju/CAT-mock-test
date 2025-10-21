@@ -1,4 +1,3 @@
-// CAT Mock Test Portal - JavaScript Application
 class CATMockTestApp {
     constructor() {
         this.currentUser = null;
@@ -1195,9 +1194,9 @@ class CATMockTestApp {
         
         // Update basic results display
         document.getElementById('totalScore').textContent = totalScore;
-        document.getElementById('varcScore').textContent = `${sectionScores.VARC}/72`;
-        document.getElementById('dilrScore').textContent = `${sectionScores.DILR}/60`;
-        document.getElementById('qaScore').textContent = `${sectionScores.QA}/66`;
+        document.getElementById('varcScore').textContent = `${sectionScores.VARC}/${sectionStats.VARC.total * 3}`;
+        document.getElementById('dilrScore').textContent = `${sectionScores.DILR}/${sectionStats.DILR.total * 3}`;
+        document.getElementById('qaScore').textContent = `${sectionScores.QA}/${sectionStats.QA.total * 3}`;
         document.getElementById('accuracyPercent').textContent = 
             `${Math.round((correctAnswers / totalAttempted) * 100)}%`;
         
@@ -1250,7 +1249,7 @@ class CATMockTestApp {
                         const sectionName = section === 'VARC' ? 'Verbal (VARC)' : 
                                           section === 'DILR' ? 'Data & Logic (DILR)' : 
                                           'Quantitative (QA)';
-                        const maxMarks = section === 'VARC' ? 72 : section === 'DILR' ? 60 : 66;
+                        const maxMarks = stats.total * 3;
                         
                         return `
                         <div style="background: white; border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem;">
@@ -1522,17 +1521,17 @@ class CATMockTestApp {
                 <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 1.5rem;">
                     <div style="text-align: center; background: rgba(255,255,255,0.2); padding: 1rem; border-radius: 8px; border: 1px solid rgba(255,255,255,0.3);">
                         <div style="font-size: 0.9rem; color: rgba(255,255,255,0.9);">VARC (Verbal)</div>
-                        <div style="font-size: 1.5rem; font-weight: bold; color: white;">${perfData.section_scores.VARC}/72</div>
+                        <div style="font-size: 1.5rem; font-weight: bold; color: white;">${perfData.section_scores.VARC}/${perfData.section_max_scores?.VARC || 72}</div>
                         <div style="font-size: 0.85rem; color: rgba(255,255,255,0.9);">${perfData.section_percentages.VARC}%</div>
                     </div>
                     <div style="text-align: center; background: rgba(255,255,255,0.2); padding: 1rem; border-radius: 8px; border: 1px solid rgba(255,255,255,0.3);">
                         <div style="font-size: 0.9rem; color: rgba(255,255,255,0.9);">DILR (Data & Logic)</div>
-                        <div style="font-size: 1.5rem; font-weight: bold; color: white;">${perfData.section_scores.DILR}/60</div>
+                        <div style="font-size: 1.5rem; font-weight: bold; color: white;">${perfData.section_scores.DILR}/${perfData.section_max_scores?.DILR || 60}</div>
                         <div style="font-size: 0.85rem; color: rgba(255,255,255,0.9);">${perfData.section_percentages.DILR}%</div>
                     </div>
                     <div style="text-align: center; background: rgba(255,255,255,0.2); padding: 1rem; border-radius: 8px; border: 1px solid rgba(255,255,255,0.3);">
                         <div style="font-size: 0.9rem; color: rgba(255,255,255,0.9);">QA (Quantitative)</div>
-                        <div style="font-size: 1.5rem; font-weight: bold; color: white;">${perfData.section_scores.QA}/66</div>
+                        <div style="font-size: 1.5rem; font-weight: bold; color: white;">${perfData.section_scores.QA}/${perfData.section_max_scores?.QA || 66}</div>
                         <div style="font-size: 0.85rem; color: rgba(255,255,255,0.9);">${perfData.section_percentages.QA}%</div>
                     </div>
                 </div>
@@ -1694,10 +1693,9 @@ class CATMockTestApp {
         csv += "Section-wise Performance\\n";
         csv += "Section,Questions Attempted,Correct Answers,Marks Obtained,Max Marks,Percentage,Accuracy\\n";
         
-        const maxMarks = {VARC: 72, DILR: 60, QA: 66};
         Object.keys(sectionStats).forEach(section => {
             const stats = sectionStats[section];
-            const sectionMax = maxMarks[section];
+            const sectionMax = stats.total * 3;
             const percentage = (Math.max(0, stats.marks) / sectionMax * 100).toFixed(1);
             const accuracy = stats.attempted > 0 ? (stats.correct / stats.attempted * 100).toFixed(1) : 0;
             

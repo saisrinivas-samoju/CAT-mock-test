@@ -1,9 +1,3 @@
-#!/usr/bin/env python3
-"""
-CAT Mock Test Portal - FastAPI Backend
-Main application entry point for the CAT mock test portal.
-"""
-
 import os
 import json
 import asyncio
@@ -14,7 +8,6 @@ import uuid
 import re
 from io import BytesIO
 
-# PDF generation imports
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter, A4
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
@@ -23,7 +16,6 @@ from reportlab.lib.units import inch
 from reportlab.pdfgen import canvas
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 
-# Import AI analysis module
 try:
     from ai_analysis import analyze_user_performance, is_ai_available
     AI_ANALYSIS_AVAILABLE = True
@@ -31,7 +23,6 @@ except ImportError as e:
     print(f"AI Analysis module not available: {e}")
     AI_ANALYSIS_AVAILABLE = False
 
-# Load environment variables
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -41,7 +32,6 @@ from fastapi.responses import HTMLResponse, FileResponse
 from pydantic import BaseModel, Field
 import pandas as pd
 
-# Initialize FastAPI app
 app = FastAPI(
     title="CAT Mock Test Portal",
     description="A comprehensive CAT exam mock test platform",
@@ -842,7 +832,30 @@ async def get_ai_analysis(username: str):
         
         # Calculate section-wise scores and marks
         section_scores = {"VARC": 0, "DILR": 0, "QA": 0}
-        section_max_scores = {"VARC": 72, "DILR": 60, "QA": 66}
+        
+        # Get dynamic question counts for max scores (3 marks per question)
+        test_data = load_test_data()
+        test_name = latest_sheet.split('_')[0] if '_' in latest_sheet else "Unknown"
+        
+        # Find the test data for this specific test
+        current_test = None
+        for test in test_data:
+            if test["name"] == test_name:
+                current_test = test
+                break
+        
+        if current_test:
+            varc_count = sum(len(q["qa_list"]) for q in current_test["data"]["VARC"])
+            dilr_count = sum(len(q["qa_list"]) for q in current_test["data"]["DILR"])
+            qa_count = sum(len(q["qa_list"]) for q in current_test["data"]["QA"])
+            section_max_scores = {
+                "VARC": varc_count * 3,
+                "DILR": dilr_count * 3,
+                "QA": qa_count * 3
+            }
+        else:
+            # Fallback to default values
+            section_max_scores = {"VARC": 72, "DILR": 60, "QA": 66}
         
         for _, row in latest_df.iterrows():
             section = row.get('Section', '')
@@ -873,11 +886,13 @@ async def get_ai_analysis(username: str):
         
         # Generate analysis
         if is_ai_available():
-            analysis_result = await analyze_user_performance(user_performance_data)
+            test_name = user_performance_data.get("test_name", "Unknown")
+            analysis_result = await analyze_user_performance(user_performance_data, test_name)
             analysis_text = analysis_result.get("analysis", "Analysis not available")
             ai_powered = True
         else:
-            analysis_text = generate_basic_analysis(section_scores, total_score)
+            test_name = user_performance_data.get("test_name", "Unknown")
+            analysis_text = generate_basic_analysis(section_scores, total_score, test_name)
             ai_powered = False
             
         return {
@@ -945,15 +960,41 @@ async def ai_followup_question(request: dict):
         
         total_score = sum(section_scores.values())
         
+        # Get dynamic question counts for max scores
+        test_data = load_test_data()
+        test_name = latest_sheet.split('_')[0] if '_' in latest_sheet else "Unknown"
+        
+        # Find the test data for this specific test
+        current_test = None
+        for test in test_data:
+            if test["name"] == test_name:
+                current_test = test
+                break
+        
+        if current_test:
+            varc_count = sum(len(q["qa_list"]) for q in current_test["data"]["VARC"])
+            dilr_count = sum(len(q["qa_list"]) for q in current_test["data"]["DILR"])
+            qa_count = sum(len(q["qa_list"]) for q in current_test["data"]["QA"])
+            max_scores = {
+                "VARC": varc_count * 3,
+                "DILR": dilr_count * 3,
+                "QA": qa_count * 3
+            }
+            total_max = sum(max_scores.values())
+        else:
+            # Fallback to default values
+            max_scores = {"VARC": 72, "DILR": 60, "QA": 66}
+            total_max = 198
+        
         # Create context for the AI
         context = f"""
 User: {username}
-Test: {latest_sheet.split('_')[0] if '_' in latest_sheet else "Recent CAT Mock Test"}
+Test: {test_name}
 Performance Context:
-- Total Score: {total_score}/198 ({total_score/198*100:.1f}%)
-- VARC: {section_scores['VARC']}/72 ({section_scores['VARC']/72*100:.1f}%)
-- DILR: {section_scores['DILR']}/60 ({section_scores['DILR']/60*100:.1f}%)
-- QA: {section_scores['QA']}/66 ({section_scores['QA']/66*100:.1f}%)
+- Total Score: {total_score}/{total_max} ({total_score/total_max*100:.1f}%)
+- VARC: {section_scores['VARC']}/{max_scores['VARC']} ({section_scores['VARC']/max_scores['VARC']*100:.1f}%)
+- DILR: {section_scores['DILR']}/{max_scores['DILR']} ({section_scores['DILR']/max_scores['DILR']*100:.1f}%)
+- QA: {section_scores['QA']}/{max_scores['QA']} ({section_scores['QA']/max_scores['QA']*100:.1f}%)
 
 User's Follow-up Question: {question}
 """
@@ -1214,9 +1255,15 @@ def generate_comprehensive_pdf_report(username, test_df, test_data, test_name):
     
     # Calculate performance summary
     section_scores = {"VARC": 0, "DILR": 0, "QA": 0}
-    section_stats = {"VARC": {"attempted": 0, "correct": 0, "total": 23}, 
-                     "DILR": {"attempted": 0, "correct": 0, "total": 22}, 
-                     "QA": {"attempted": 0, "correct": 0, "total": 22}}
+    
+    # Get dynamic question counts
+    varc_count = sum(len(q["qa_list"]) for q in test_data["VARC"])
+    dilr_count = sum(len(q["qa_list"]) for q in test_data["DILR"])
+    qa_count = sum(len(q["qa_list"]) for q in test_data["QA"])
+    
+    section_stats = {"VARC": {"attempted": 0, "correct": 0, "total": varc_count}, 
+                     "DILR": {"attempted": 0, "correct": 0, "total": dilr_count}, 
+                     "QA": {"attempted": 0, "correct": 0, "total": qa_count}}
     
     for _, row in test_df.iterrows():
         section = row.get('Section', '')
@@ -1241,14 +1288,18 @@ def generate_comprehensive_pdf_report(username, test_df, test_data, test_name):
     # Performance Summary Table
     story.append(Paragraph("Performance Summary", heading_style))
     
+    # Calculate dynamic totals
+    total_questions = varc_count + dilr_count + qa_count
+    total_max_score = total_questions * 3
+    
     summary_data = [
         ['Metric', 'Score', 'Details'],
-        ['Overall Score', f'{total_score}/198', f'{(total_score/198*100):.1f}%'],
-        ['Questions Attempted', f'{total_attempted}/66', f'{(total_attempted/66*100):.1f}%'],
+        ['Overall Score', f'{total_score}/{total_max_score}', f'{(total_score/total_max_score*100):.1f}%'],
+        ['Questions Attempted', f'{total_attempted}/{total_questions}', f'{(total_attempted/total_questions*100):.1f}%'],
         ['Correct Answers', f'{total_correct}/{total_attempted}' if total_attempted > 0 else '0/0', f'{(total_correct/total_attempted*100):.1f}%' if total_attempted > 0 else 'N/A'],
-        ['VARC Score', f'{section_scores["VARC"]}/72', f'{(section_scores["VARC"]/72*100):.1f}%'],
-        ['DILR Score', f'{section_scores["DILR"]}/60', f'{(section_scores["DILR"]/60*100):.1f}%'],
-        ['QA Score', f'{section_scores["QA"]}/66', f'{(section_scores["QA"]/66*100):.1f}%'],
+        ['VARC Score', f'{section_scores["VARC"]}/{varc_count * 3}', f'{(section_scores["VARC"]/(varc_count * 3)*100):.1f}%'],
+        ['DILR Score', f'{section_scores["DILR"]}/{dilr_count * 3}', f'{(section_scores["DILR"]/(dilr_count * 3)*100):.1f}%'],
+        ['QA Score', f'{section_scores["QA"]}/{qa_count * 3}', f'{(section_scores["QA"]/(qa_count * 3)*100):.1f}%'],
     ]
     
     summary_table = Table(summary_data, colWidths=[2.5*inch, 1.5*inch, 1.5*inch])
@@ -1533,9 +1584,33 @@ def format_time_human(seconds: float) -> str:
         mins = int((seconds % 3600) // 60)
         return f"{hours}h {mins}m"
 
-def generate_basic_analysis(section_scores: dict, total_score: int) -> str:
+def generate_basic_analysis(section_scores: dict, total_score: int, test_name: str = None) -> str:
     """Generate basic analysis when AI is not available"""
-    section_max = {"VARC": 72, "DILR": 60, "QA": 66}
+    # Get dynamic question counts
+    test_data = load_test_data()
+    
+    # Find the test data for this specific test
+    current_test = None
+    if test_name:
+        for test in test_data:
+            if test["name"] == test_name:
+                current_test = test
+                break
+    
+    if current_test:
+        varc_count = sum(len(q["qa_list"]) for q in current_test["data"]["VARC"])
+        dilr_count = sum(len(q["qa_list"]) for q in current_test["data"]["DILR"])
+        qa_count = sum(len(q["qa_list"]) for q in current_test["data"]["QA"])
+        section_max = {
+            "VARC": varc_count * 3,
+            "DILR": dilr_count * 3,
+            "QA": qa_count * 3
+        }
+        total_max = sum(section_max.values())
+    else:
+        # Fallback to default values
+        section_max = {"VARC": 72, "DILR": 60, "QA": 66}
+        total_max = 198
     
     # Find best and worst sections
     section_percentages = {k: (v/section_max[k])*100 for k, v in section_scores.items()}
@@ -1546,13 +1621,13 @@ def generate_basic_analysis(section_scores: dict, total_score: int) -> str:
 ## 📊 CAT Performance Analysis
 
 ### Overall Performance  
-- **Total Score:** {total_score}/198 ({total_score/198*100:.1f}%)
-- **Performance Level:** {'Excellent' if total_score > 140 else 'Good' if total_score > 100 else 'Average' if total_score > 60 else 'Needs Improvement'}
+- **Total Score:** {total_score}/{total_max} ({total_score/total_max*100:.1f}%)
+- **Performance Level:** {'Excellent' if total_score > total_max*0.7 else 'Good' if total_score > total_max*0.5 else 'Average' if total_score > total_max*0.3 else 'Needs Improvement'}
 
 ### Section-wise Marks Breakdown
-- **VARC (Verbal):** {section_scores['VARC']}/72 marks ({section_percentages['VARC']:.1f}%)
-- **DILR (Data Interpretation):** {section_scores['DILR']}/60 marks ({section_percentages['DILR']:.1f}%)  
-- **QA (Quantitative):** {section_scores['QA']}/66 marks ({section_percentages['QA']:.1f}%)
+- **VARC (Verbal):** {section_scores['VARC']}/{section_max['VARC']} marks ({section_percentages['VARC']:.1f}%)
+- **DILR (Data Interpretation):** {section_scores['DILR']}/{section_max['DILR']} marks ({section_percentages['DILR']:.1f}%)  
+- **QA (Quantitative):** {section_scores['QA']}/{section_max['QA']} marks ({section_percentages['QA']:.1f}%)
 
 ### Key Insights
 - **Strongest Section:** {best_section} ({section_percentages[best_section]:.1f}%)
