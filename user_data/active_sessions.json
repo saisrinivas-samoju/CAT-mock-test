@@ -1,0 +1,170 @@
+{
+  "112302ac-a8bc-423b-bec5-2932adbc65fa": {
+    "username": "aswathi_",
+    "test_name": "CAT-2022-Slot-1",
+    "section": "VARC",
+    "question_index": 0,
+    "answers": {},
+    "bookmarks": [],
+    "flags": {},
+    "time_started": "2025-10-27T23:32:55.968094",
+    "time_remaining": 1000,
+    "section_times": {
+      "VARC": 2400,
+      "DILR": 2400,
+      "QA": 2400
+    },
+    "is_paused": false
+  },
+  "5075aa0d-8b0f-4e78-acbd-3c260cc533ff": {
+    "username": "aswathi_",
+    "test_name": "CAT-2024-Slot-1",
+    "section": "VARC",
+    "question_index": 0,
+    "answers": {
+      "QA_22": {
+        "answer": "d",
+        "correct_answer": "b",
+        "time_spent": 96,
+        "timestamp": "2025-10-27T21:37:42.522470",
+        "section": "QA"
+      },
+      "QA_20": {
+        "answer": "b",
+        "correct_answer": "b",
+        "time_spent": 458,
+        "timestamp": "2025-10-27T21:58:51.318183",
+        "section": "QA"
+      },
+      "QA_19": {
+        "answer": "d",
+        "correct_answer": "d",
+        "time_spent": 422,
+        "timestamp": "2025-10-27T22:07:19.090627",
+        "section": "QA"
+      },
+      "QA_17": {
+        "answer": "64",
+        "correct_answer": "38",
+        "time_spent": 159,
+        "timestamp": "2025-10-27T22:14:34.900838",
+        "section": "QA"
+      },
+      "QA_16": {
+        "answer": "577",
+        "correct_answer": "10",
+        "time_spent": 295,
+        "timestamp": "2025-10-27T22:18:46.281795",
+        "section": "QA"
+      },
+      "QA_15": {
+        "answer": "66",
+        "correct_answer": "66",
+        "time_spent": 440,
+        "timestamp": "2025-10-27T22:26:45.061826",
+        "section": "QA"
+      },
+      "QA_14": {
+        "answer": "a",
+        "correct_answer": "a",
+        "time_spent": 496,
+        "timestamp": "2025-10-27T22:33:38.123828",
+        "section": "QA"
+      },
+      "QA_13": {
+        "answer": "6",
+        "correct_answer": "15",
+        "time_spent": 269,
+        "timestamp": "2025-10-27T22:38:35.810307",
+        "section": "QA"
+      },
+      "DILR_5": {
+        "answer": "c",
+        "correct_answer": "d",
+        "time_spent": 175,
+        "timestamp": "2025-10-27T22:52:16.913739",
+        "section": "DILR"
+      },
+      "DILR_6": {
+        "answer": "d",
+        "correct_answer": "a",
+        "time_spent": 8,
+        "timestamp": "2025-10-27T22:52:59.806273",
+        "section": "DILR"
+      },
+      "DILR_7": {
+        "answer": "b",
+        "correct_answer": "a",
+        "time_spent": 193,
+        "timestamp": "2025-10-27T22:55:54.321916",
+        "section": "DILR"
+      },
+      "DILR_10": {
+        "answer": "24",
+        "correct_answer": "8",
+        "time_spent": 290,
+        "timestamp": "2025-10-27T23:01:25.205222",
+        "section": "DILR"
+      },
+      "DILR_12": {
+        "answer": "d",
+        "correct_answer": "d",
+        "time_spent": 133,
+        "timestamp": "2025-10-27T23:02:55.316640",
+        "section": "DILR"
+      },
+      "DILR_14": {
+        "answer": "5",
+        "correct_answer": "5",
+        "time_spent": 190,
+        "timestamp": "2025-10-27T23:10:36.942426",
+        "section": "DILR"
+      },
+      "DILR_13": {
+        "answer": "3",
+        "correct_answer": "3",
+        "time_spent": 117,
+        "timestamp": "2025-10-27T23:12:06.103841",
+        "section": "DILR"
+      },
+      "DILR_19": {
+        "answer": "3",
+        "correct_answer": "3",
+        "time_spent": 175,
+        "timestamp": "2025-10-27T23:15:04.465826",
+        "section": "DILR"
+      },
+      "DILR_21": {
+        "answer": "4",
+        "correct_answer": "4",
+        "time_spent": 32,
+        "timestamp": "2025-10-27T23:17:20.871244",
+        "section": "DILR"
+      },
+      "DILR_20": {
+        "answer": "6",
+        "correct_answer": "2",
+        "time_spent": 112,
+        "timestamp": "2025-10-27T23:18:28.077285",
+        "section": "DILR"
+      },
+      "VARC_5": {
+        "answer": "<",
+        "correct_answer": "d",
+        "time_spent": 133,
+        "timestamp": "2025-10-27T23:21:51.410147",
+        "section": "VARC"
+      }
+    },
+    "bookmarks": [],
+    "flags": {},
+    "time_started": "2025-10-27T21:35:12.181168",
+    "time_remaining": 7200,
+    "section_times": {
+      "VARC": 2400,
+      "DILR": 2400,
+      "QA": 2400
+    },
+    "is_paused": false
+  }
+}
