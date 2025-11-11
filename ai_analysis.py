@@ -244,7 +244,12 @@ class CATAnalysisAI:
         total_max_score = sum(question_counts.values()) * 3
         
         formatted.append(f"\n🏆 Overall Performance:")
-        formatted.append(f"- Total Score: {total_score}/{total_max_score} ({total_score/total_max_score*100:.1f}%)")
+        # Fix division by zero - check if total_max_score > 0 before dividing
+        if total_max_score > 0:
+            percentage = (total_score / total_max_score) * 100
+        else:
+            percentage = 0.0
+        formatted.append(f"- Total Score: {total_score}/{total_max_score} ({percentage:.1f}%)")
         
         formatted.append(f"\n📊 Section-wise Performance:")
         performance_insights = user_data.get('performance_insights', {})
@@ -254,7 +259,13 @@ class CATAnalysisAI:
             max_marks = question_counts[section] * 3
             section_data = section_analysis.get(section, {})
             formatted.append(f"\n{section}:")
-            formatted.append(f"  - Score: {section_scores.get(section, 0)}/{max_marks} ({section_scores.get(section, 0)/max_marks*100:.1f}%)")
+            # Fix division by zero - check if max_marks > 0 before dividing
+            section_score = section_scores.get(section, 0)
+            if max_marks > 0:
+                section_percentage = (section_score / max_marks) * 100
+            else:
+                section_percentage = 0.0
+            formatted.append(f"  - Score: {section_score}/{max_marks} ({section_percentage:.1f}%)")
             formatted.append(f"  - Questions Attempted: {section_data.get('attempted', 0)}")
             formatted.append(f"  - Questions Correct: {section_data.get('correct', 0)}")
             formatted.append(f"  - Section Accuracy: {section_data.get('accuracy', 0):.1f}%")

@@ -12,27 +12,54 @@ class CATMockTestApp {
         this.timerInterval = null;
         this.autoSaveInterval = null;
         this.questionStartTime = null;
+        this.isSubmitting = false; // Flag to prevent duplicate submissions
         this.sectionQuestions = {
             'VARC': [],
             'DILR': [],
             'QA': []
         };
         
+        // Initialize dark mode immediately to prevent flash
+        this.initDarkMode();
+        
         this.init();
     }
 
     async init() {
+        
+        // Browser compatibility checks
+        this.checkBrowserCompatibility();
+        
         // Check if user is already logged in
         const savedUser = localStorage.getItem('catUser');
         if (savedUser) {
-            this.currentUser = JSON.parse(savedUser);
-            
-            // Check for page refresh recovery first
-            const recovered = await this.checkForPageRefreshRecovery();
-            
-            if (!recovered) {
-                this.showPage('dashboardPage');
-                await this.loadDashboard();
+            try {
+                this.currentUser = JSON.parse(savedUser);
+                
+                // Validate parsed user object
+                if (!this.currentUser || !this.currentUser.username) {
+                    console.warn('Invalid user data in localStorage, clearing...');
+                    localStorage.removeItem('catUser');
+                    this.currentUser = null;
+                    this.showPage('authPage');
+                    this.setupEventListeners();
+                    return;
+                }
+                
+                // Check for page refresh recovery first
+                const recovered = await this.checkForPageRefreshRecovery();
+                
+                if (!recovered) {
+                    this.showPage('dashboardPage');
+                    await this.loadDashboard();
+                }
+            } catch (error) {
+                console.error('Error parsing user data from localStorage:', error);
+                console.warn('Clearing corrupted localStorage data...');
+                // Clear corrupted data
+                localStorage.removeItem('catUser');
+                this.currentUser = null;
+                this.showPage('authPage');
             }
         } else {
             this.showPage('authPage');
@@ -48,7 +75,7 @@ class CATMockTestApp {
         try {
             const response = await fetch(`/api/active-session/${this.currentUser.username}`);
             if (response.ok) {
-                const sessionData = await response.json();
+                const sessionData = await this.safeJsonParse(response);
                 if (sessionData.session_id && !sessionData.is_paused) {
                     const answeredCount = Object.keys(sessionData.answers || {}).length;
                     const timeRemainingMins = Math.floor(sessionData.time_remaining / 60);
@@ -84,6 +111,16 @@ class CATMockTestApp {
 
     async resumeInterruptedSession(sessionData) {
         try {
+            // Clear any existing intervals first
+            if (this.timerInterval) {
+                clearInterval(this.timerInterval);
+                this.timerInterval = null;
+            }
+            if (this.autoSaveInterval) {
+                clearInterval(this.autoSaveInterval);
+                this.autoSaveInterval = null;
+            }
+            
             this.currentSession = sessionData.session_id;
             
             // Load test data
@@ -91,7 +128,14 @@ class CATMockTestApp {
             if (!testResponse.ok) {
                 throw new Error('Failed to load test data');
             }
-            const testData = await testResponse.json();
+            
+            let testData;
+            try {
+                testData = await this.safeJsonParse(testResponse);
+            } catch (parseError) {
+                console.error('Error parsing test data response:', parseError);
+                throw new Error('Failed to parse test data response');
+            }
             
             // Store raw test data and properly flatten questions
             this.testData = testData;
@@ -107,7 +151,37 @@ class CATMockTestApp {
             Object.keys(sessionData.answers || {}).forEach(questionId => {
                 const answerData = sessionData.answers[questionId];
                 if (answerData && answerData.answer && answerData.answer.trim() !== '') {
-                    this.answers[questionId] = answerData.answer;
+                    // Normalize answer - preserve numeric format, lowercase alphabetic
+                    let answer = answerData.answer.trim();
+                    
+                    // Handle old sessions where answer might be stored as HTML (e.g., "<p>a) text...</p>")
+                    // Check if answer contains HTML tags - if so, extract just the option letter/number
+                    if (answer.includes('<') && answer.includes('>')) {
+                        // This is HTML format - need to find the question type to extract properly
+                        // Try to find question data to get question type
+                        let questionType = 'Multiple Choice Question'; // Default
+                        for (const [sectionName, questions] of Object.entries(this.sectionQuestions)) {
+                            const question = questions.find(q => q.id === questionId);
+                            if (question) {
+                                questionType = question.question_type || questionType;
+                                break;
+                            }
+                        }
+                        // Extract answer from HTML using the helper function
+                        answer = this.extractAnswerFromHtml(answer, questionType);
+                    }
+                    
+                    // Now normalize the extracted answer
+                    if (/^\d+$/.test(answer)) {
+                        // Numeric option: keep as string
+                        this.answers[questionId] = answer;
+                    } else if (answer.length === 1 && /[a-zA-Z]/.test(answer)) {
+                        // Single letter option: lowercase
+                        this.answers[questionId] = answer.toLowerCase();
+                    } else {
+                        // TITA or other format: keep as-is
+                        this.answers[questionId] = answer;
+                    }
                 }
             });
             
@@ -115,10 +189,25 @@ class CATMockTestApp {
             this.flags = sessionData.flags || {};
             this.currentSection = sessionData.section || 'VARC';
             this.currentQuestionIndex = sessionData.question_index || 0;
-            this.timeRemaining = sessionData.time_remaining || 7200;
+            // Ensure time_remaining is never negative
+            this.timeRemaining = Math.max(0, sessionData.time_remaining || 7200);
+            
+            // If time has expired, auto-submit instead of showing negative time
+            if (this.timeRemaining <= 0) {
+                this.showToast('Test time has expired. Submitting automatically...', 'warning');
+                setTimeout(() => {
+                    if (!this.isSubmitting) {
+                        this.submitTest();
+                    }
+                }, 1000);
+                return;
+            }
             
             // Set test name for display
-            document.getElementById('testName').textContent = sessionData.test_name;
+            const testNameEl = document.getElementById('testName');
+            if (testNameEl) {
+                testNameEl.textContent = sessionData.test_name;
+            }
             
             // Switch to test page
             this.showPage('testPage');
@@ -156,17 +245,24 @@ class CATMockTestApp {
 
     resetButtonStates() {
         // Reset submit button to normal state
+        // Also reset the isSubmitting flag to prevent stuck state
+        this.isSubmitting = false;
+        
         const submitButtons = document.querySelectorAll('[onclick*="submitTest"]');
         submitButtons.forEach(btn => {
-            btn.disabled = false;
-            btn.innerHTML = '<i class="fas fa-paper-plane"></i> Submit';
+            if (btn) {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fas fa-paper-plane"></i> Submit';
+            }
         });
         
         // Reset other control buttons if needed
         const saveButtons = document.querySelectorAll('[onclick*="saveTest"]');
         saveButtons.forEach(btn => {
-            btn.disabled = false;
-            btn.innerHTML = '<i class="fas fa-save"></i> Save';
+            if (btn) {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fas fa-save"></i> Save';
+            }
         });
         
         const pauseButtons = document.querySelectorAll('[onclick*="pauseTest"]');
@@ -186,16 +282,176 @@ class CATMockTestApp {
 
         // Auto-save on page unload
         window.addEventListener('beforeunload', () => {
+            // Clear intervals to prevent memory leaks
+            if (this.timerInterval) {
+                clearInterval(this.timerInterval);
+                this.timerInterval = null;
+            }
+            if (this.autoSaveInterval) {
+                clearInterval(this.autoSaveInterval);
+                this.autoSaveInterval = null;
+            }
+            
+            // Try to save session (but don't block unload)
             if (this.currentSession) {
-                this.saveSession();
+                // Use sendBeacon for reliable saving on page unload
+                try {
+                    navigator.sendBeacon('/api/save-session', JSON.stringify({
+                        session_id: this.currentSession
+                    }));
+                } catch (e) {
+                    // Fallback: synchronous fetch (may be cancelled)
+                    fetch('/api/save-session', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ session_id: this.currentSession }),
+                        keepalive: true
+                    }).catch(() => {}); // Ignore errors on unload
+                }
             }
         });
+        
+        // Global error handler for unhandled errors
+        window.addEventListener('error', (event) => {
+            // Enhanced error logging to help debug
+            const errorDetails = {
+                message: event.message,
+                filename: event.filename,
+                lineno: event.lineno,
+                colno: event.colno,
+                error: event.error,
+                stack: event.error?.stack,
+                timestamp: new Date().toISOString(),
+                userAgent: navigator.userAgent,
+                currentSession: this.currentSession,
+                currentUser: this.currentUser?.username
+            };
+            console.error('Global JavaScript error:', errorDetails);
+            
+            // Log to console with full details for debugging
+            console.group('🚨 Unexpected Error Details');
+            console.error('Error:', event.error);
+            console.error('Message:', event.message);
+            console.error('File:', event.filename, 'Line:', event.lineno);
+            console.error('Stack:', event.error?.stack);
+            console.error('Session:', this.currentSession);
+            console.groupEnd();
+            
+            // Try to save session if exists (with better error handling)
+            if (this.currentSession) {
+                this.saveSession().catch((saveError) => {
+                    console.error('Failed to save session during error recovery:', saveError);
+                });
+            }
+            // Show user-friendly error message
+            this.showToast('An unexpected error occurred. Your progress has been saved.', 'error');
+        });
+        
+        // Handle unhandled promise rejections
+        window.addEventListener('unhandledrejection', (event) => {
+            // Enhanced logging for promise rejections
+            const errorDetails = {
+                reason: event.reason,
+                promise: event.promise,
+                timestamp: new Date().toISOString(),
+                currentSession: this.currentSession,
+                currentUser: this.currentUser?.username
+            };
+            console.error('Unhandled promise rejection:', errorDetails);
+            
+            // Log full details
+            console.group('🚨 Unhandled Promise Rejection');
+            console.error('Reason:', event.reason);
+            console.error('Type:', typeof event.reason);
+            console.error('Stack:', event.reason?.stack || 'No stack trace');
+            console.error('Session:', this.currentSession);
+            console.groupEnd();
+            
+            // Try to save session if exists
+            if (this.currentSession) {
+                this.saveSession().catch((saveError) => {
+                    console.error('Failed to save session during promise rejection recovery:', saveError);
+                });
+            }
+            // Show user-friendly error message
+            this.showToast('An error occurred. Your progress has been saved.', 'error');
+            // Prevent default browser error handling
+            event.preventDefault();
+        });
+    }
+    
+    checkBrowserCompatibility() {
+        /**Check browser compatibility and provide fallbacks or warnings*/
+        const issues = [];
+        
+        // Check localStorage support
+        try {
+            const testKey = '__localStorage_test__';
+            localStorage.setItem(testKey, 'test');
+            localStorage.removeItem(testKey);
+        } catch (e) {
+            issues.push('localStorage is not available. Your progress may not be saved.');
+            console.warn('localStorage not available:', e);
+        }
+        
+        // Check fetch API support
+        if (!window.fetch) {
+            issues.push('Fetch API is not available. Using XMLHttpRequest fallback.');
+            // Polyfill would be needed for older browsers
+            if (!window.XMLHttpRequest) {
+                issues.push('No HTTP request method available. App may not work.');
+            }
+        }
+        
+        // Check for required DOM methods
+        if (!document.querySelector || !document.getElementById) {
+            issues.push('Required DOM methods not available. App may not work.');
+        }
+        
+        // Check for Promise support
+        if (typeof Promise === 'undefined') {
+            issues.push('Promises are not supported. App may not work correctly.');
+        }
+        
+        // Check for async/await support (ES2017) - without using eval()
+        // Use feature detection instead of eval for security
+        try {
+            // Test if async functions can be created by checking constructor
+            const asyncFunctionConstructor = (async function() {}).constructor;
+            if (!asyncFunctionConstructor) {
+                issues.push('Async/await not supported. Some features may not work.');
+            }
+        } catch (e) {
+            issues.push('Async/await not supported. Some features may not work.');
+        }
+        
+        // Show warnings if any issues found
+        if (issues.length > 0) {
+            console.warn('Browser compatibility issues detected:', issues);
+            
+            // Only show critical warnings to user
+            const criticalIssues = issues.filter(issue => 
+                issue.includes('may not work') || issue.includes('not available')
+            );
+            
+            if (criticalIssues.length > 0) {
+                this.showToast(
+                    `Browser compatibility warning: ${criticalIssues[0]}`,
+                    'warning'
+                );
+            }
+        }
     }
 
     // Utility Functions
     showPage(pageId) {
         document.querySelectorAll('.page').forEach(page => page.classList.remove('active'));
         document.getElementById(pageId).classList.add('active');
+        
+        // Update user greeting when showing dashboard
+        if (pageId === 'dashboardPage') {
+            this.updateUserGreeting();
+        }
     }
 
     showLoading() {
@@ -206,8 +462,13 @@ class CATMockTestApp {
         document.getElementById('loadingOverlay').classList.remove('active');
     }
 
-    showToast(message, type = 'info') {
+    showToast(message, type = 'info', persistent = false) {
         const toastContainer = document.getElementById('toastContainer');
+        if (!toastContainer) {
+            console.error('Toast container not found');
+            return;
+        }
+        
         const toast = document.createElement('div');
         toast.className = `toast ${type}`;
         
@@ -218,24 +479,122 @@ class CATMockTestApp {
             'info': 'fa-info-circle'
         }[type];
         
+        // For persistent errors, add a close button and make it stay longer
+        const closeBtn = persistent ? '<button class="toast-close" onclick="this.parentElement.remove()" title="Close">&times;</button>' : '';
+        
         toast.innerHTML = `
             <i class="fas ${icon}"></i>
             <span>${message}</span>
+            ${closeBtn}
         `;
         
         toastContainer.appendChild(toast);
         setTimeout(() => toast.classList.add('show'), 100);
         
-        setTimeout(() => {
-            toast.classList.remove('show');
-            setTimeout(() => toastContainer.removeChild(toast), 300);
-        }, 3000);
+        // For errors, make them persistent (user must close) or show longer
+        const duration = persistent ? 0 : (type === 'error' ? 10000 : 3000); // 10 seconds for errors
+        
+        if (duration > 0) {
+            setTimeout(() => {
+                if (toast.parentElement) {
+                    toast.classList.remove('show');
+                    setTimeout(() => {
+                        if (toast.parentElement) {
+                            toastContainer.removeChild(toast);
+                        }
+                    }, 300);
+                }
+            }, duration);
+        }
+        
+        // Also log to persistent error area for critical errors
+        if (type === 'error' && persistent) {
+            this.showPersistentError(message);
+        }
+    }
+    
+    showPersistentError(errorMessage) {
+        // Create or update persistent error display
+        let errorDisplay = document.getElementById('persistentErrorDisplay');
+        if (!errorDisplay) {
+            errorDisplay = document.createElement('div');
+            errorDisplay.id = 'persistentErrorDisplay';
+            errorDisplay.className = 'persistent-error-display';
+            errorDisplay.innerHTML = `
+                <div class="persistent-error-content">
+                    <div class="persistent-error-header">
+                        <i class="fas fa-exclamation-triangle"></i>
+                        <strong>Submission Error</strong>
+                        <button onclick="document.getElementById('persistentErrorDisplay').remove()" class="persistent-error-close">&times;</button>
+                    </div>
+                    <div class="persistent-error-message"></div>
+                    <div class="persistent-error-actions">
+                        <button onclick="app.retrySubmission()" class="action-btn primary">Retry Submission</button>
+                        <button onclick="document.getElementById('persistentErrorDisplay').remove()" class="action-btn">Dismiss</button>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(errorDisplay);
+        }
+        
+        const messageEl = errorDisplay.querySelector('.persistent-error-message');
+        if (messageEl) {
+            messageEl.textContent = errorMessage;
+        }
+        
+        // Make it visible
+        errorDisplay.style.display = 'block';
+    }
+    
+    async retrySubmission() {
+        // Remove persistent error display
+        const errorDisplay = document.getElementById('persistentErrorDisplay');
+        if (errorDisplay) {
+            errorDisplay.remove();
+        }
+        
+        // Retry submission
+        await this.submitTest();
+    }
+
+    initDarkMode() {
+        // Check for saved dark mode preference
+        const isDarkMode = localStorage.getItem('darkMode') === 'true';
+        if (isDarkMode) {
+            document.documentElement.classList.add('dark-mode');
+            document.body.classList.add('dark-mode');
+            this.updateThemeIcon(true);
+        } else {
+            this.updateThemeIcon(false);
+        }
+    }
+
+    toggleDarkMode() {
+        const isDarkMode = document.body.classList.toggle('dark-mode');
+        document.documentElement.classList.toggle('dark-mode', isDarkMode);
+        localStorage.setItem('darkMode', isDarkMode.toString());
+        this.updateThemeIcon(isDarkMode);
+    }
+
+    updateThemeIcon(isDarkMode) {
+        const themeIcons = document.querySelectorAll('.theme-icon');
+        themeIcons.forEach(icon => {
+            if (isDarkMode) {
+                icon.classList.remove('fa-moon');
+                icon.classList.add('fa-sun');
+            } else {
+                icon.classList.remove('fa-sun');
+                icon.classList.add('fa-moon');
+            }
+        });
     }
 
     formatTime(seconds) {
-        const hours = Math.floor(seconds / 3600);
-        const minutes = Math.floor((seconds % 3600) / 60);
-        const secs = seconds % 60;
+        // Ensure seconds is never negative
+        const safeSeconds = Math.max(0, Math.floor(seconds || 0));
+        const hours = Math.floor(safeSeconds / 3600);
+        const minutes = Math.floor((safeSeconds % 3600) / 60);
+        const secs = safeSeconds % 60;
         return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
     }
 
@@ -261,12 +620,46 @@ class CATMockTestApp {
                 body: JSON.stringify({ name, username })
             });
 
-            const data = await response.json();
+            let data;
+            try {
+                const contentType = response.headers.get('content-type');
+                if (contentType && contentType.includes('application/json')) {
+                    data = await response.json();
+                } else {
+                    const text = await response.text();
+                    throw new Error(text || `Server returned ${response.status}: ${response.statusText}`);
+                }
+            } catch (parseError) {
+                console.error('Error parsing signup response:', parseError);
+                this.showToast('Error: Invalid response from server', 'error');
+                this.hideLoading();
+                return;
+            }
 
             if (response.ok) {
-                this.showToast('Account created successfully!', 'success');
                 this.currentUser = { username: data.username, name: data.name };
-                localStorage.setItem('catUser', JSON.stringify(this.currentUser));
+                this.showToast(`Welcome, ${data.name}! Account created successfully!`, 'success');
+                try {
+                    localStorage.setItem('catUser', JSON.stringify(this.currentUser));
+                } catch (error) {
+                    if (error.name === 'QuotaExceededError' || error.code === 22) {
+                        console.warn('localStorage quota exceeded. Clearing old data...');
+                        // Try to clear and retry once
+                        try {
+                            localStorage.clear();
+                            localStorage.setItem('catUser', JSON.stringify(this.currentUser));
+                            console.log('Successfully saved user data after clearing localStorage');
+                        } catch (retryError) {
+                            console.error('Failed to save user data even after clearing localStorage:', retryError);
+                            this.showToast('Warning: Could not save login session. You may need to login again after refresh.', 'warning');
+                        }
+                    } else {
+                        console.error('Error saving to localStorage:', error);
+                        this.showToast('Warning: Could not save login session.', 'warning');
+                    }
+                }
+                // Update greeting before showing dashboard
+                this.updateUserGreeting();
                 this.showPage('dashboardPage');
                 await this.loadDashboard();
             } else {
@@ -300,12 +693,40 @@ class CATMockTestApp {
                 body: JSON.stringify({ username })
             });
 
-            const data = await response.json();
+            let data;
+            try {
+                data = await this.safeJsonParse(response);
+            } catch (parseError) {
+                console.error('Error parsing login response:', parseError);
+                this.showToast('Error: Invalid response from server', 'error');
+                this.hideLoading();
+                return;
+            }
 
             if (response.ok) {
-                this.showToast(`Welcome back, ${data.name}!`, 'success');
                 this.currentUser = { username: data.username, name: data.name };
-                localStorage.setItem('catUser', JSON.stringify(this.currentUser));
+                this.showToast(`Welcome back, ${data.name}!`, 'success');
+                try {
+                    localStorage.setItem('catUser', JSON.stringify(this.currentUser));
+                } catch (error) {
+                    if (error.name === 'QuotaExceededError' || error.code === 22) {
+                        console.warn('localStorage quota exceeded. Clearing old data...');
+                        // Try to clear and retry once
+                        try {
+                            localStorage.clear();
+                            localStorage.setItem('catUser', JSON.stringify(this.currentUser));
+                            console.log('Successfully saved user data after clearing localStorage');
+                        } catch (retryError) {
+                            console.error('Failed to save user data even after clearing localStorage:', retryError);
+                            this.showToast('Warning: Could not save login session. You may need to login again after refresh.', 'warning');
+                        }
+                    } else {
+                        console.error('Error saving to localStorage:', error);
+                        this.showToast('Warning: Could not save login session.', 'warning');
+                    }
+                }
+                // Update greeting before showing dashboard
+                this.updateUserGreeting();
                 this.showPage('dashboardPage');
                 await this.loadDashboard();
             } else {
@@ -319,19 +740,57 @@ class CATMockTestApp {
         }
     }
 
-    logout() {
+    async logout() {
+        // Clear intervals to prevent memory leaks
+        if (this.timerInterval) {
+            clearInterval(this.timerInterval);
+            this.timerInterval = null;
+        }
+        if (this.autoSaveInterval) {
+            clearInterval(this.autoSaveInterval);
+            this.autoSaveInterval = null;
+        }
+        
+        // Clean up session if exists
+        if (this.currentSession) {
+            try {
+                await fetch('/api/cleanup-session', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ session_id: this.currentSession })
+                }).catch(() => {}); // Ignore errors on logout
+            } catch (e) {
+                // Ignore cleanup errors
+            }
+            this.currentSession = null;
+        }
+        
+        // Reset submission flag
+        this.isSubmitting = false;
+        
+        // Clear user data
         localStorage.removeItem('catUser');
         this.currentUser = null;
-        this.currentSession = null;
-        if (this.timerInterval) clearInterval(this.timerInterval);
-        if (this.autoSaveInterval) clearInterval(this.autoSaveInterval);
+        
         this.showPage('authPage');
         this.showToast('Logged out successfully', 'info');
     }
 
+    // Update user greeting
+    updateUserGreeting() {
+        const greetingElement = document.getElementById('userGreeting');
+        if (greetingElement && this.currentUser && this.currentUser.name) {
+            greetingElement.textContent = `Welcome, ${this.currentUser.name}!`;
+        } else if (greetingElement) {
+            greetingElement.textContent = 'Welcome!';
+        }
+    }
+
     // Dashboard Functions
     async loadDashboard() {
-        document.getElementById('userGreeting').textContent = `Welcome, ${this.currentUser.name}!`;
+        // Update greeting first
+        this.updateUserGreeting();
+        
         await this.loadAvailableTests();
         await this.loadUserProgress();
         await this.checkForPausedTests();
@@ -342,7 +801,7 @@ class CATMockTestApp {
             const response = await fetch(`/api/paused-tests/${this.currentUser.username}`);
             
             if (response.ok) {
-                const pausedTests = await response.json();
+                const pausedTests = await this.safeJsonParse(response);
                 
                 if (pausedTests.length > 0) {
                     this.displayPausedTests(pausedTests);
@@ -403,7 +862,7 @@ class CATMockTestApp {
             const response = await fetch(`/api/user-stats/${this.currentUser.username}`);
             
             if (response.ok) {
-                const stats = await response.json();
+                const stats = await this.safeJsonParse(response);
                 this.updateProgressDisplay(stats);
             } else {
                 // No progress data yet, show defaults
@@ -426,24 +885,110 @@ class CATMockTestApp {
         }
     }
 
+    async showCompletedTests() {
+        try {
+            this.showLoading();
+            const response = await fetch(`/api/completed-tests/${this.currentUser.username}`);
+            
+            if (response.ok) {
+                const completedTests = await this.safeJsonParse(response);
+                
+                if (completedTests.length === 0) {
+                    this.showToast('No completed tests found.', 'info');
+                    return;
+                }
+                
+                // Create and show modal with completed tests
+                this.displayCompletedTestsModal(completedTests);
+            } else {
+                this.showToast('Failed to load completed tests.', 'error');
+            }
+        } catch (error) {
+            console.error('Error loading completed tests:', error);
+            this.showToast('Error loading completed tests.', 'error');
+        } finally {
+            this.hideLoading();
+        }
+    }
+
+    displayCompletedTestsModal(completedTests) {
+        // Create modal HTML
+        const modalHTML = `
+            <div id="completedTestsModal" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 10000; display: flex; align-items: center; justify-content: center;">
+                <div style="background: var(--surface-color); border-radius: 12px; padding: 2rem; max-width: 800px; width: 90%; max-height: 80vh; overflow-y: auto; box-shadow: 0 10px 30px rgba(0,0,0,0.3);">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
+                        <h2 style="margin: 0; color: var(--text-primary);"><i class="fas fa-check-circle"></i> Completed Tests</h2>
+                        <button onclick="document.getElementById('completedTestsModal').remove()" style="background: none; border: none; font-size: 1.5rem; cursor: pointer; color: var(--text-secondary);">&times;</button>
+                    </div>
+                    <div style="display: flex; flex-direction: column; gap: 1rem;">
+                        ${completedTests.map(test => `
+                            <div style="padding: 1.5rem; background: var(--background-color); border-radius: 8px; border: 2px solid var(--border-color);">
+                                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+                                    <h3 style="margin: 0; color: var(--text-primary);">${this.escapeHtml(test.test_name || 'Unknown Test')}</h3>
+                                    <span style="color: var(--text-secondary); font-size: 0.9rem;">${this.escapeHtml(test.date || '')}</span>
+                                </div>
+                                <div style="display: flex; gap: 2rem; margin-top: 1rem;">
+                                    <div>
+                                        <span style="color: var(--text-secondary);">Score:</span>
+                                        <span style="color: var(--primary-color); font-weight: bold; margin-left: 0.5rem;">${test.total_score || 0}/198</span>
+                                    </div>
+                                    <div>
+                                        <span style="color: var(--text-secondary);">Accuracy:</span>
+                                        <span style="color: var(--success-color); font-weight: bold; margin-left: 0.5rem;">${test.accuracy || 0}%</span>
+                                    </div>
+                                </div>
+                            </div>
+                        `).join('')}
+                    </div>
+                    <div style="margin-top: 1.5rem; text-align: right;">
+                        <button onclick="document.getElementById('completedTestsModal').remove()" style="padding: 0.75rem 1.5rem; background: var(--primary-color); color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 1rem;">Close</button>
+                    </div>
+                </div>
+            </div>
+        `;
+        
+        // Remove existing modal if any
+        const existingModal = document.getElementById('completedTestsModal');
+        if (existingModal) {
+            existingModal.remove();
+        }
+        
+        // Add modal to body
+        document.body.insertAdjacentHTML('beforeend', modalHTML);
+    }
+
     updateProgressDisplay(stats) {
-        // Update total time
-        const hours = Math.floor(stats.total_time / 3600);
-        const minutes = Math.floor((stats.total_time % 3600) / 60);
-        document.getElementById('totalTime').textContent = `${hours}h ${minutes}m`;
+        // Update total time - with null check
+        const totalTimeEl = document.getElementById('totalTime');
+        if (totalTimeEl) {
+            const hours = Math.floor(stats.total_time / 3600);
+            const minutes = Math.floor((stats.total_time % 3600) / 60);
+            totalTimeEl.textContent = `${hours}h ${minutes}m`;
+        }
         
-        // Update tests completed
-        document.getElementById('testsCompleted').textContent = stats.tests_completed || stats.total_attempts || 0;
+        // Update tests completed - make it clickable
+        const testsCompletedElement = document.getElementById('testsCompleted');
+        if (testsCompletedElement) {
+            testsCompletedElement.textContent = stats.tests_completed || stats.total_attempts || 0;
+            // Make it clickable to show completed tests
+            testsCompletedElement.style.cursor = 'pointer';
+            testsCompletedElement.style.color = 'var(--primary-color)';
+            testsCompletedElement.style.textDecoration = 'underline';
+            testsCompletedElement.onclick = () => this.showCompletedTests();
+        }
         
-        // Update average score
-        const avgScore = stats.average_score || 0;
-        document.getElementById('avgScore').textContent = `${Math.round(avgScore)}%`;
+        // Update average score - with null check
+        const avgScoreEl = document.getElementById('avgScore');
+        if (avgScoreEl) {
+            const avgScore = stats.average_score || 0;
+            avgScoreEl.textContent = `${Math.round(avgScore)}%`;
+        }
     }
 
     async loadAvailableTests() {
         try {
             const response = await fetch('/api/tests');
-            const tests = await response.json();
+            const tests = await this.safeJsonParse(response);
             
             const testsGrid = document.getElementById('testsList');
             testsGrid.innerHTML = tests.map(test => `
@@ -509,20 +1054,30 @@ class CATMockTestApp {
             });
 
             if (!sessionResponse.ok) {
-                const errorData = await sessionResponse.json();
+                let errorData;
+                try {
+                    errorData = await this.safeJsonParse(sessionResponse);
+                } catch {
+                    errorData = { detail: 'Failed to start test session' };
+                }
                 throw new Error(errorData.detail || 'Failed to start test session');
             }
             
-            const sessionData = await sessionResponse.json();
+            const sessionData = await this.safeJsonParse(sessionResponse);
             this.currentSession = sessionData.session_id;
 
             // Load test data
             const testResponse = await fetch(`/api/test-data/${testName}`);
             if (!testResponse.ok) {
-                const errorData = await testResponse.json();
+                let errorData;
+                try {
+                    errorData = await this.safeJsonParse(testResponse);
+                } catch {
+                    errorData = { detail: 'Failed to load test data' };
+                }
                 throw new Error(errorData.detail || 'Failed to load test data');
             }
-            this.testData = await testResponse.json();
+            this.testData = await this.safeJsonParse(testResponse);
             
             // Initialize test state
             this.initializeTest(testName);
@@ -543,7 +1098,23 @@ class CATMockTestApp {
 
     initializeTest(testName) {
         console.log('Initializing test:', testName);
-        document.getElementById('testName').textContent = testName;
+        
+        // Reset all button states and flags before starting new test
+        this.resetButtonStates();
+        this.isSubmitting = false;
+        
+        // Validate testData exists
+        if (!this.testData) {
+            console.error('Test data not loaded');
+            this.showToast('Error: Test data not loaded. Please try again.', 'error');
+            return;
+        }
+        
+        // Update test name display (with null check)
+        const testNameElement = document.getElementById('testName');
+        if (testNameElement) {
+            testNameElement.textContent = testName || 'CAT Mock Test';
+        }
         
         // Reset all test state
         this.currentSection = 'VARC';
@@ -552,19 +1123,36 @@ class CATMockTestApp {
         this.bookmarks = [];
         this.flags = {};
         this.timeRemaining = 7200;
+        this.isSubmitting = false; // Reset submission flag
         
-        // Flatten questions for easy navigation
-        this.sectionQuestions = {
-            'VARC': this.flattenQuestions(this.testData.VARC, 'VARC'),
-            'DILR': this.flattenQuestions(this.testData.DILR, 'DILR'),
-            'QA': this.flattenQuestions(this.testData.QA, 'QA')
-        };
-        
-        console.log('Section questions:', {
-            VARC: this.sectionQuestions.VARC.length,
-            DILR: this.sectionQuestions.DILR.length,
-            QA: this.sectionQuestions.QA.length
-        });
+        // Flatten questions for easy navigation (with validation)
+        try {
+            this.sectionQuestions = {
+                'VARC': this.flattenQuestions(this.testData.VARC || [], 'VARC'),
+                'DILR': this.flattenQuestions(this.testData.DILR || [], 'DILR'),
+                'QA': this.flattenQuestions(this.testData.QA || [], 'QA')
+            };
+            
+            // Validate that we have questions
+            const totalQuestions = this.sectionQuestions.VARC.length + 
+                                  this.sectionQuestions.DILR.length + 
+                                  this.sectionQuestions.QA.length;
+            
+            if (totalQuestions === 0) {
+                throw new Error('No questions found in test data');
+            }
+            
+            console.log('Section questions:', {
+                VARC: this.sectionQuestions.VARC.length,
+                DILR: this.sectionQuestions.DILR.length,
+                QA: this.sectionQuestions.QA.length,
+                total: totalQuestions
+            });
+        } catch (error) {
+            console.error('Error initializing test:', error);
+            this.showToast(`Error loading test: ${error.message}`, 'error');
+            return;
+        }
         
         // Ensure VARC tab is selected initially
         document.querySelectorAll('.section-tab').forEach(tab => {
@@ -582,8 +1170,32 @@ class CATMockTestApp {
         const questions = [];
         let questionCounter = 1; // Fallback counter for question numbering
         
-        sectionData.forEach(questionObj => {
-            questionObj.qa_list.forEach(qa => {
+        // Validate sectionData is array
+        if (!sectionData || !Array.isArray(sectionData)) {
+            console.error(`Invalid sectionData for ${sectionName}:`, sectionData);
+            return questions; // Return empty array
+        }
+        
+        sectionData.forEach((questionObj, objIndex) => {
+            // Validate questionObj structure
+            if (!questionObj || typeof questionObj !== 'object') {
+                console.warn(`Invalid questionObj at index ${objIndex} in ${sectionName}`);
+                return; // Skip this object
+            }
+            
+            // Validate qa_list exists and is array
+            const qa_list = questionObj.qa_list;
+            if (!qa_list || !Array.isArray(qa_list) || qa_list.length === 0) {
+                console.warn(`No qa_list found in questionObj at index ${objIndex} in ${sectionName}`);
+                return; // Skip if no questions
+            }
+            
+            qa_list.forEach((qa, qaIndex) => {
+                // Validate qa is an object
+                if (!qa || typeof qa !== 'object') {
+                    console.warn(`Invalid qa at index ${qaIndex} in ${sectionName} questionObj ${objIndex}`);
+                    return; // Skip this qa
+                }
                 // Get question number with fallback
                 let questionNum = Array.isArray(qa.question_num) ? qa.question_num[0] : qa.question_num;
                 
@@ -601,7 +1213,7 @@ class CATMockTestApp {
                     question: qa.question,
                     question_type: qa.question_type,
                     options: qa.options,
-                    answer: qa.answer,
+                    answer: this.extractAnswerFromHtml(qa.answer, qa.question_type), // Extract just the letter/number
                     solution: qa.solution,
                     number: questionNum,
                     section: sectionName
@@ -620,7 +1232,16 @@ class CATMockTestApp {
 
     generateQuestionPalette() {
         const paletteContainer = document.getElementById('paletteQuestions');
+        if (!paletteContainer) {
+            console.error('paletteQuestions container not found');
+            return;
+        }
+        
         const currentQuestions = this.sectionQuestions[this.currentSection];
+        if (!currentQuestions || !Array.isArray(currentQuestions) || currentQuestions.length === 0) {
+            paletteContainer.innerHTML = '<p style="text-align: center; color: var(--text-light);">No questions available</p>';
+            return;
+        }
         
         paletteContainer.innerHTML = currentQuestions.map((q, index) => {
             // Use fallback numbering if q.number is undefined
@@ -639,8 +1260,22 @@ class CATMockTestApp {
         const buttons = document.querySelectorAll('#paletteQuestions .question-btn');
         const currentQuestions = this.sectionQuestions[this.currentSection];
         
+        // Validate currentQuestions exists and is array
+        if (!currentQuestions || !Array.isArray(currentQuestions)) {
+            return;
+        }
+        
         buttons.forEach((btn, index) => {
+            // Validate index is within bounds
+            if (index >= currentQuestions.length) {
+                return;
+            }
+            
             const question = currentQuestions[index];
+            if (!question) {
+                return;
+            }
+            
             const questionId = question.id;
             
             // Reset classes
@@ -674,16 +1309,40 @@ class CATMockTestApp {
 
     displayQuestion() {
         const currentQuestions = this.sectionQuestions[this.currentSection];
+        
+        // Validate questions array exists and has items
+        if (!currentQuestions || !Array.isArray(currentQuestions) || currentQuestions.length === 0) {
+            console.error(`No questions available for section ${this.currentSection}`);
+            this.showToast(`Error: No questions loaded for ${this.currentSection} section`, 'error');
+            return;
+        }
+        
+        // Validate and clamp question index
+        if (this.currentQuestionIndex < 0) {
+            this.currentQuestionIndex = 0;
+        } else if (this.currentQuestionIndex >= currentQuestions.length) {
+            this.currentQuestionIndex = currentQuestions.length - 1;
+        }
+        
         const question = currentQuestions[this.currentQuestionIndex];
         
-        if (!question) return;
+        if (!question) {
+            console.error(`Question at index ${this.currentQuestionIndex} not found`);
+            return;
+        }
 
-        // Update section indicator
-        document.getElementById('currentSection').textContent = this.currentSection;
+        // Update section indicator (with null check)
+        const sectionElement = document.getElementById('currentSection');
+        if (sectionElement) {
+            sectionElement.textContent = this.currentSection;
+        }
         
-        // Update question number
-        document.getElementById('questionNumber').textContent = 
-            `Question ${this.currentQuestionIndex + 1} of ${currentQuestions.length}`;
+        // Update question number (with null check)
+        const questionNumberElement = document.getElementById('questionNumber');
+        if (questionNumberElement) {
+            questionNumberElement.textContent = 
+                `Question ${this.currentQuestionIndex + 1} of ${currentQuestions.length}`;
+        }
         
         // Update navigation buttons
         const prevBtn = document.querySelector('.nav-btn:first-child');
@@ -697,36 +1356,60 @@ class CATMockTestApp {
         const contextArea = document.getElementById('questionContext');
         let contextContent = '';
         
-        // Add image if available
-        if (question.image_source) {
-            const imagePath = question.image_source.replace('input/images/', '/static/images/');
+        // Add image if available (with path validation)
+        if (question.image_source && typeof question.image_source === 'string') {
+            // Sanitize image path to prevent directory traversal attacks
+            let imagePath = question.image_source.replace('input/images/', '/static/images/');
+            
+            // Remove any path traversal attempts (..)
+            imagePath = imagePath.replace(/\.\./g, '');
+            
+            // Ensure path starts with /static/images/ for security
+            if (!imagePath.startsWith('/static/images/')) {
+                console.warn(`Invalid image path format: ${question.image_source}. Using sanitized path.`);
+                imagePath = '/static/images/' + imagePath.split('/').pop();
+            }
+            
+            // Escape HTML in image source to prevent XSS
+            const safeImageSource = this.escapeHtml(question.image_source);
+            const safeImageName = safeImageSource.split('/').pop();
+            
             contextContent += `
                 <div class="question-image" style="text-align: center; margin-bottom: 1rem;">
-                    <img src="${imagePath}" 
+                    <img src="${this.escapeHtml(imagePath)}" 
                          alt="Question diagram" 
                          style="max-width: 100%; height: auto; border: 1px solid var(--border-color); border-radius: 4px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);"
                          onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
-                    <div style="display: none; padding: 1rem; background: #fff3cd; color: #856404; border: 1px solid #ffeaa7; border-radius: 4px; margin-top: 0.5rem;">
-                        <i class="fas fa-exclamation-triangle"></i> Image not available: ${question.image_source.split('/').pop()}
+                    <div style="display: none; padding: 1rem; background: var(--warning-color); color: var(--text-primary); border: 1px solid var(--warning-color); border-radius: 4px; margin-top: 0.5rem; opacity: 0.1;">
+                        <i class="fas fa-exclamation-triangle"></i> Image not available: ${safeImageName}
                     </div>
                 </div>
             `;
         }
         
-        // Add context text
+        // Add context text - render HTML properly (context from trusted backend)
         if (question.context && question.context.trim()) {
+            // Render HTML directly since it comes from trusted backend source
             contextContent += question.context;
         }
         
         if (contextContent.trim()) {
+            // Use innerHTML only for the formatted image, text is already escaped
             contextArea.innerHTML = contextContent;
             contextArea.style.display = 'block';
         } else {
             contextArea.style.display = 'none';
         }
         
-        // Display question text
-        document.querySelector('.question-text').innerHTML = question.question;
+        // Display question text (with null check)
+        // Ensure HTML is rendered properly, not escaped
+        const questionTextElement = document.querySelector('.question-text');
+        if (questionTextElement && question.question) {
+            // Directly set innerHTML to render HTML tags properly
+            questionTextElement.innerHTML = question.question;
+        } else if (questionTextElement) {
+            questionTextElement.innerHTML = '';
+        }
         
         // Display answer options
         this.displayAnswerOptions(question);
@@ -746,17 +1429,130 @@ class CATMockTestApp {
 
     displayAnswerOptions(question) {
         const optionsContainer = document.getElementById('answerOptions');
+        if (!optionsContainer) {
+            console.error('answerOptions container not found');
+            return;
+        }
         
         if (question.question_type === 'Multiple Choice Question' && question.options) {
-            // MCQ options
-            optionsContainer.innerHTML = question.options.map(option => {
-                const optionLetter = option.charAt(0);
-                const isSelected = this.answers[question.id] === optionLetter;
+            // Helper function to process LaTeX in option text
+            const processOptionText = (optionText) => {
+                // Create a temporary div to extract text content (handles HTML tags)
+                const tempDiv = document.createElement('div');
+                tempDiv.innerHTML = optionText;
+                let text = tempDiv.textContent || tempDiv.innerText || optionText;
+                text = text.trim();
+                
+                // Check if text contains LaTeX commands (like \frac, \sqrt, etc.)
+                // Pattern matches: \command, \command{...}, etc.
+                const hasLatex = /\\[a-zA-Z]+\{?[^\}]*\}?/.test(text);
+                
+                if (hasLatex) {
+                    // Check if already wrapped in MathJax delimiters ($, \( \), \[ \])
+                    const hasDelimiters = /[\$]|\\\(|\\\[|\\\]|\\\)/.test(text);
+                    
+                    if (!hasDelimiters) {
+                        // Split text into label part and content part
+                        // Match patterns like "[2] ", "a) ", "1. ", etc. at the start
+                        const labelMatch = text.match(/^(\[?\d+[a-z]?\]?\s*[-)]?\s*)/i);
+                        
+                        if (labelMatch) {
+                            const label = labelMatch[1];
+                            let content = text.substring(label.length).trim();
+                            
+                            // If original was HTML, preserve HTML structure but wrap LaTeX
+                            if (optionText.includes('<')) {
+                                // Replace the content part in the original HTML
+                                // Find where the label ends in the HTML
+                                const htmlLabelMatch = optionText.match(/^(<[^>]*>)?\[?\d+[a-z]?\]?\s*[-)]?\s*/i);
+                                if (htmlLabelMatch) {
+                                    const htmlLabel = htmlLabelMatch[0];
+                                    const htmlContent = optionText.substring(htmlLabel.length);
+                                    // Wrap LaTeX parts in the HTML content
+                                    const processedContent = htmlContent.replace(
+                                        /([^\<]*\\[a-zA-Z]+[^<]*)/,
+                                        (match) => {
+                                            // Check if this match has LaTeX
+                                            if (/\\[a-zA-Z]+\{?[^\}]*\}?/.test(match) && !/[\$]|\\\(|\\\[/.test(match)) {
+                                                return '\\( ' + match + ' \\)';
+                                            }
+                                            return match;
+                                        }
+                                    );
+                                    return htmlLabel + processedContent;
+                                }
+                            }
+                            
+                            // For plain text, wrap only the content (not the label) in \( \) delimiters
+                            return label + '\\( ' + content + ' \\)';
+                        } else {
+                            // No label found
+                            if (optionText.includes('<')) {
+                                // HTML: wrap LaTeX parts inside HTML tags
+                                return optionText.replace(
+                                    /(>[^<]*\\[a-zA-Z]+[^<]*)/,
+                                    (match) => {
+                                        const content = match.substring(1);
+                                        if (/\\[a-zA-Z]+\{?[^\}]*\}?/.test(content) && !/[\$]|\\\(|\\\[/.test(content)) {
+                                            return '>\\( ' + content + ' \\)';
+                                        }
+                                        return match;
+                                    }
+                                );
+                            }
+                            // Plain text: wrap entire content
+                            return '\\( ' + text + ' \\)';
+                        }
+                    }
+                }
+                
+                // No LaTeX found or already has delimiters
+                return optionText;
+            };
+            
+            // MCQ options - Use index-based mapping to ensure consistent option labels
+            // Detect format from first option or correct answer, then map index accordingly
+            // Supports both numeric (1, 2, 3, 4) and alphabetic (a, b, c, d) formats
+            const firstOption = question.options && question.options.length > 0 ? question.options[0] : '';
+            const firstChar = firstOption.trim().charAt(0);
+            const isNumericFormat = /^\d/.test(firstChar);
+            
+            // Try to detect from correct answer if first option format is unclear
+            let formatDetected = isNumericFormat;
+            if (!isNumericFormat && !/^[a-zA-Z]/.test(firstChar) && question.answer) {
+                // If first option doesn't start with digit or letter, check correct answer format
+                const answerChar = String(question.answer).trim().charAt(0);
+                formatDetected = /^\d/.test(answerChar);
+            }
+            
+            optionsContainer.innerHTML = question.options.map((option, index) => {
+                // Map index to label based on detected format:
+                // Numeric: 0→'1', 1→'2', 2→'3', 3→'4'
+                // Alphabetic: 0→'a', 1→'b', 2→'c', 3→'d'
+                const optionLabel = formatDetected 
+                    ? String(index + 1)  // Numeric: 1, 2, 3, 4
+                    : String.fromCharCode(97 + index).toLowerCase(); // Alphabetic: a, b, c, d
+                
+                // Check if selected - support both formats (normalize for comparison)
+                const savedAnswer = String(this.answers[question.id] || '').toLowerCase().trim();
+                const isSelected = savedAnswer === optionLabel.toLowerCase() ||
+                                   savedAnswer === String(index + 1) ||
+                                   savedAnswer === String.fromCharCode(97 + index).toLowerCase();
+                
+                // Process option text to ensure LaTeX is properly formatted
+                const processedOption = processOptionText(option);
+                
+                // Escape question.id and optionLabel to prevent XSS in onclick handler
+                const safeQuestionId = this.escapeHtml(question.id).replace(/'/g, "\\'");
+                const safeOptionLabel = this.escapeHtml(optionLabel).replace(/'/g, "\\'");
                 
                 return `
-                    <div class="option ${isSelected ? 'selected' : ''}" onclick="app.selectOption('${question.id}', '${optionLetter}')">
-                        <input type="radio" name="answer" value="${optionLetter}" ${isSelected ? 'checked' : ''}>
-                        <span>${option}</span>
+                    <div class="option ${isSelected ? 'selected' : ''}" 
+                         data-question-id="${safeQuestionId}" 
+                         data-option-label="${safeOptionLabel}"
+                         onclick="app.selectOption('${safeQuestionId}', '${safeOptionLabel}')">
+                        <input type="radio" name="answer" value="${optionLabel}" ${isSelected ? 'checked' : ''}>
+                        <span>${processedOption}</span>
                     </div>
                 `;
             }).join('');
@@ -764,15 +1560,25 @@ class CATMockTestApp {
             // TITA input
             const currentAnswer = this.answers[question.id] || '';
             
+            // Escape question.id to prevent XSS
+            const safeQuestionId = this.escapeHtml(question.id).replace(/'/g, "\\'");
+            const safeAnswer = this.escapeHtml(currentAnswer).replace(/"/g, "&quot;");
+            
             optionsContainer.innerHTML = `
                 <input type="text" class="tita-input" placeholder="Enter your answer" 
-                       value="${currentAnswer}" onchange="app.setTITAAnswer('${question.id}', this.value)">
+                       value="${safeAnswer}" 
+                       data-question-id="${safeQuestionId}"
+                       onchange="app.setTITAAnswer('${safeQuestionId}', this.value)">
             `;
         }
     }
 
-    selectOption(questionId, optionLetter) {
-        this.answers[questionId] = optionLetter;
+    selectOption(questionId, optionLabel, eventElement = null) {
+        // Normalize option label - preserve format (numeric stays numeric, letter stays letter but lowercase)
+        const normalizedLabel = /^\d+$/.test(String(optionLabel).trim()) 
+            ? String(optionLabel).trim()  // Numeric: keep as string (e.g., "1", "2")
+            : String(optionLabel).toLowerCase().trim(); // Alphabetic: lowercase (e.g., "a", "b")
+        this.answers[questionId] = normalizedLabel;
         
         // Update UI - remove selected class from all options
         document.querySelectorAll('.option').forEach(option => {
@@ -784,14 +1590,24 @@ class CATMockTestApp {
         });
         
         // Add selected class and check radio button for current option
-        event.currentTarget.classList.add('selected');
-        const radioInput = event.currentTarget.querySelector('input[type="radio"]');
-        if (radioInput) {
-            radioInput.checked = true;
+        // Handle both event.currentTarget (from onclick) and explicit element parameter
+        const targetElement = eventElement || (typeof event !== 'undefined' && event.currentTarget) || 
+                             document.querySelector(`.option[data-question-id="${questionId}"][data-option-label="${optionLabel}"]`);
+        
+        if (targetElement) {
+            targetElement.classList.add('selected');
+            const radioInput = targetElement.querySelector('input[type="radio"]');
+            if (radioInput) {
+                radioInput.checked = true;
+            }
         }
         
-        // Submit answer
-        this.submitAnswer(questionId, optionLetter);
+        // Submit answer (already normalized in selectOption)
+        // Call without await to avoid blocking, but handle errors
+        this.submitAnswer(questionId, normalizedLabel).catch((error) => {
+            console.error('Error in submitAnswer (from selectOption):', error);
+            // Error already logged in submitAnswer, just catch to prevent unhandled rejection
+        });
         
         // Update palette
         this.updatePaletteStatus();
@@ -799,7 +1615,11 @@ class CATMockTestApp {
 
     setTITAAnswer(questionId, value) {
         this.answers[questionId] = value.trim();
-        this.submitAnswer(questionId, value.trim());
+        // Call without await to avoid blocking, but handle errors
+        this.submitAnswer(questionId, value.trim()).catch((error) => {
+            console.error('Error in submitAnswer (from setTITAAnswer):', error);
+            // Error already logged in submitAnswer, just catch to prevent unhandled rejection
+        });
         this.updatePaletteStatus();
     }
 
@@ -807,8 +1627,23 @@ class CATMockTestApp {
         const timeSpent = this.questionStartTime ? 
             Math.floor((Date.now() - this.questionStartTime) / 1000) : 0;
         
+        // Validate inputs before making API call
+        if (!questionId || answer === undefined || answer === null) {
+            console.error('Invalid submitAnswer call:', { questionId, answer });
+            return;
+        }
+        
+        if (!this.currentSession) {
+            console.error('No active session when submitting answer');
+            return;
+        }
+        
         try {
-            await fetch('/api/submit-answer', {
+            // Add timeout to fetch to prevent hanging requests
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+            
+            const response = await fetch('/api/submit-answer', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
@@ -818,10 +1653,59 @@ class CATMockTestApp {
                     question_id: questionId,
                     answer: answer,
                     time_spent: timeSpent
-                })
+                }),
+                signal: controller.signal
+            }).finally(() => {
+                clearTimeout(timeoutId);
             });
+            
+            // Check response status and handle errors
+            if (!response.ok) {
+                let errorData;
+                try {
+                    errorData = await this.safeJsonParse(response);
+                } catch {
+                    errorData = { detail: response.statusText || 'Failed to submit answer' };
+                }
+                console.error('Answer submission failed:', {
+                    questionId,
+                    status: response.status,
+                    error: errorData.detail
+                });
+                // Don't show toast for every failure to avoid spam
+                return;
+            }
+            
+            // Parse successful response
+            try {
+                await this.safeJsonParse(response);
+            } catch (parseError) {
+                console.warn('Answer submitted but response parsing failed:', parseError);
+            }
         } catch (error) {
-            console.error('Error submitting answer:', error);
+            // Enhanced error logging
+            if (error.name === 'AbortError') {
+                console.error('Answer submission timed out:', questionId);
+            } else if (error instanceof TypeError && error.message.includes('fetch')) {
+                console.error('Network error submitting answer:', {
+                    questionId,
+                    error: error.message,
+                    session: this.currentSession
+                });
+            } else {
+                console.error('Error submitting answer:', {
+                    questionId,
+                    answer,
+                    error: error.message,
+                    stack: error.stack,
+                    session: this.currentSession
+                });
+            }
+            // Only show toast for non-network errors to avoid spam
+            if (!error.message?.includes('fetch') && !error.message?.includes('network')) {
+                this.showToast('Failed to save answer. Please try again.', 'error');
+            }
+            // Don't re-throw - we've handled the error
         }
     }
 
@@ -834,25 +1718,65 @@ class CATMockTestApp {
             '<i class="far fa-bookmark"></i> Bookmark';
     }
 
-    // MathJax rendering helper
+    // MathJax rendering helper with comprehensive error handling
     renderMathJax() {
         try {
-            if (window.MathJax) {
-                if (MathJax.typesetPromise) {
-                    // MathJax v3 API
-                    MathJax.typesetPromise([document.getElementById('questionBody')]).catch((err) => {
-                        console.warn('MathJax rendering error:', err);
-                    });
-                } else if (MathJax.Hub && MathJax.Hub.Queue) {
-                    // MathJax v2 API fallback
-                    MathJax.Hub.Queue(["Typeset", MathJax.Hub, "questionBody"]);
-                } else if (MathJax.typeset) {
-                    // Alternative v3 API
-                    MathJax.typeset([document.getElementById('questionBody')]);
+            if (!window.MathJax) {
+                console.warn('MathJax library not loaded');
+                return;
+            }
+            
+            const questionBody = document.getElementById('questionBody');
+            if (!questionBody) {
+                console.warn('questionBody element not found for MathJax rendering');
+                return;
+            }
+            
+            // MathJax v3 API (modern)
+            if (MathJax.typesetPromise) {
+                MathJax.typesetPromise([questionBody]).catch((err) => {
+                    console.warn('MathJax v3 rendering error:', err);
+                    // Fallback: try alternative rendering method
+                    this.renderMathJaxFallback(questionBody);
+                });
+            } 
+            // MathJax v2 API (legacy)
+            else if (MathJax.Hub && MathJax.Hub.Queue) {
+                try {
+                    MathJax.Hub.Queue(["Typeset", MathJax.Hub, questionBody]);
+                } catch (err) {
+                    console.warn('MathJax v2 rendering error:', err);
+                    this.renderMathJaxFallback(questionBody);
                 }
+            } 
+            // Alternative v3 API
+            else if (MathJax.typeset) {
+                try {
+                    MathJax.typeset([questionBody]);
+                } catch (err) {
+                    console.warn('MathJax alternative API rendering error:', err);
+                    this.renderMathJaxFallback(questionBody);
+                }
+            } else {
+                console.warn('MathJax API not recognized');
             }
         } catch (error) {
-            console.warn('MathJax not available or error rendering:', error);
+            console.error('Unexpected error in MathJax rendering:', error);
+            // Ensure question is still displayed even if MathJax fails
+        }
+    }
+    
+    // Fallback MathJax rendering method
+    renderMathJaxFallback(element) {
+        try {
+            // Try to manually trigger MathJax rendering with delay
+            setTimeout(() => {
+                if (window.MathJax && MathJax.typeset) {
+                    MathJax.typeset([element]);
+                }
+            }, 500);
+        } catch (err) {
+            console.warn('MathJax fallback rendering also failed:', err);
         }
     }
 
@@ -863,6 +1787,15 @@ class CATMockTestApp {
     }
 
     previousQuestion() {
+        const currentQuestions = this.sectionQuestions[this.currentSection];
+        
+        // Validate questions array exists and has items
+        if (!currentQuestions || !Array.isArray(currentQuestions) || currentQuestions.length === 0) {
+            console.error('No questions available for navigation');
+            return;
+        }
+        
+        // Validate and clamp index before decrementing
         if (this.currentQuestionIndex > 0) {
             this.currentQuestionIndex--;
             this.displayQuestion();
@@ -871,6 +1804,17 @@ class CATMockTestApp {
 
     nextQuestion() {
         const currentQuestions = this.sectionQuestions[this.currentSection];
+        
+        // Validate questions array exists and has items
+        if (!currentQuestions || !Array.isArray(currentQuestions) || currentQuestions.length === 0) {
+            console.error('No questions available for navigation');
+            return;
+        }
+        
+        // Validate index bounds before incrementing
+        if (this.currentQuestionIndex < 0) {
+            this.currentQuestionIndex = 0;
+        }
         
         if (this.currentQuestionIndex < currentQuestions.length - 1) {
             this.currentQuestionIndex++;
@@ -891,6 +1835,13 @@ class CATMockTestApp {
     }
 
     switchSection(section) {
+        // Validate section name
+        const validSections = ['VARC', 'DILR', 'QA'];
+        if (!validSections.includes(section)) {
+            console.error(`Invalid section name: ${section}. Defaulting to VARC.`);
+            section = 'VARC';
+        }
+        
         this.currentSection = section;
         this.currentQuestionIndex = 0;
         
@@ -912,7 +1863,24 @@ class CATMockTestApp {
     // Question Actions
     async toggleBookmark() {
         const currentQuestions = this.sectionQuestions[this.currentSection];
+        
+        // Validate questions array and index
+        if (!currentQuestions || !Array.isArray(currentQuestions) || currentQuestions.length === 0) {
+            console.error('No questions available for bookmark operation');
+            return;
+        }
+        
+        if (this.currentQuestionIndex < 0 || this.currentQuestionIndex >= currentQuestions.length) {
+            console.error(`Invalid question index: ${this.currentQuestionIndex}`);
+            return;
+        }
+        
         const question = currentQuestions[this.currentQuestionIndex];
+        if (!question || !question.id) {
+            console.error('Invalid question object');
+            return;
+        }
+        
         const questionId = question.id;
         
         const isBookmarked = this.bookmarks.includes(questionId);
@@ -984,9 +1952,44 @@ class CATMockTestApp {
 
     // Timer Functions
     startTimer() {
+        // Clear any existing timer interval first (prevent memory leaks)
+        if (this.timerInterval) {
+            clearInterval(this.timerInterval);
+            this.timerInterval = null;
+        }
+        
+        // Ensure timeRemaining is never negative before starting
+        this.timeRemaining = Math.max(0, this.timeRemaining || 7200);
+        
+        // If time is already expired, don't start timer, auto-submit instead
+        if (this.timeRemaining <= 0) {
+            this.showToast('⚠️ Test time has expired. Submitting automatically...', 'warning');
+            setTimeout(() => {
+                if (!this.isSubmitting && this.currentSession) {
+                    this.submitTest();
+                }
+            }, 1000);
+            return;
+        }
+        
+        // Update display immediately
+        const timeElement = document.getElementById('timeRemaining');
+        if (timeElement) {
+            timeElement.textContent = this.formatTime(this.timeRemaining);
+        }
+        
         this.timerInterval = setInterval(() => {
-            this.timeRemaining--;
-            document.getElementById('timeRemaining').textContent = this.formatTime(this.timeRemaining);
+            // Ensure time never goes below 0
+            if (this.timeRemaining > 0) {
+                this.timeRemaining--;
+            } else {
+                this.timeRemaining = 0; // Clamp to 0
+            }
+            
+            const timeElement = document.getElementById('timeRemaining');
+            if (timeElement) {
+                timeElement.textContent = this.formatTime(this.timeRemaining);
+            }
             
             // Time warnings
             if (this.timeRemaining === 600) { // 10 minutes
@@ -996,15 +1999,73 @@ class CATMockTestApp {
             } else if (this.timeRemaining === 60) { // 1 minute
                 this.showToast('1 minute remaining!', 'warning');
             } else if (this.timeRemaining <= 0) {
-                this.submitTest();
+                // Clear timer immediately to prevent race conditions
+                if (this.timerInterval) {
+                    clearInterval(this.timerInterval);
+                    this.timerInterval = null;
+                }
+                // Auto-submit if not already submitting
+                if (!this.isSubmitting) {
+                    this.submitTest();
+                }
             }
         }, 1000);
     }
 
     startAutoSave() {
+        // Clear any existing auto-save interval first (prevent memory leaks)
+        if (this.autoSaveInterval) {
+            clearInterval(this.autoSaveInterval);
+            this.autoSaveInterval = null;
+        }
+        
         this.autoSaveInterval = setInterval(() => {
-            this.saveSession();
+            // Wrap in async IIFE to handle errors properly
+            (async () => {
+                try {
+                    await this.saveSession();
+                } catch (error) {
+                    // Silently handle auto-save errors to avoid interrupting user
+                    console.warn('Auto-save failed (will retry):', error.message);
+                }
+            })();
         }, 30000); // Auto-save every 30 seconds
+    }
+
+    // Wait for DOM element to be ready
+    async waitForDOMReady(selector, timeout = 5000) {
+        return new Promise((resolve, reject) => {
+            // Check if element already exists
+            if (document.querySelector(selector)) {
+                resolve();
+                return;
+            }
+            
+            // Use MutationObserver to watch for element
+            const observer = new MutationObserver((mutations, obs) => {
+                if (document.querySelector(selector)) {
+                    obs.disconnect();
+                    resolve();
+                }
+            });
+            
+            observer.observe(document.body, {
+                childList: true,
+                subtree: true
+            });
+            
+            // Timeout fallback
+            setTimeout(() => {
+                observer.disconnect();
+                if (document.querySelector(selector)) {
+                    resolve();
+                } else {
+                    // Don't reject - just warn and continue
+                    console.warn(`Element ${selector} not found after ${timeout}ms, continuing anyway`);
+                    resolve();
+                }
+            }, timeout);
+        });
     }
 
     // Session Management
@@ -1017,6 +2078,10 @@ class CATMockTestApp {
         console.log('Attempting to save session:', this.currentSession);
         
         try {
+            // Add timeout to prevent hanging
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 second timeout
+            
             const response = await fetch('/api/save-session', {
                 method: 'POST',
                 headers: {
@@ -1024,20 +2089,37 @@ class CATMockTestApp {
                 },
                 body: JSON.stringify({
                     session_id: this.currentSession
-                })
+                }),
+                signal: controller.signal
+            }).finally(() => {
+                clearTimeout(timeoutId);
             });
             
             console.log('Save session response status:', response.status);
             
             if (!response.ok) {
-                const errorData = await response.json();
+                let errorData;
+                try {
+                    errorData = await this.safeJsonParse(response);
+                } catch {
+                    errorData = { detail: response.statusText };
+                }
                 throw new Error(`Save failed: ${errorData.detail || response.statusText}`);
             }
             
-            const result = await response.json();
+            const result = await this.safeJsonParse(response);
             console.log('Save session result:', result);
         } catch (error) {
-            console.error('Error saving session:', error);
+            // Enhanced error logging
+            if (error.name === 'AbortError') {
+                console.error('Session save timed out:', this.currentSession);
+            } else {
+                console.error('Error saving session:', {
+                    session: this.currentSession,
+                    error: error.message,
+                    stack: error.stack
+                });
+            }
             throw error; // Re-throw to allow proper error handling in submitTest
         }
     }
@@ -1082,20 +2164,40 @@ class CATMockTestApp {
     }
 
     async submitTest() {
+        // Prevent multiple submissions
+        if (this.isSubmitting) {
+            console.warn('Test submission already in progress');
+            return;
+        }
+        
         if (!confirm('Are you sure you want to submit the test? This action cannot be undone.')) {
             return;
         }
         
-        // Disable submit button to prevent double-clicks
+        // Store button references before any async operations
         const submitButtons = document.querySelectorAll('[onclick*="submitTest"]');
+        
+        // Set submission flag to prevent duplicates
+        this.isSubmitting = true;
+        
+        // Disable submit button to prevent double-clicks
         submitButtons.forEach(btn => {
-            btn.disabled = true;
-            btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Submitting...';
+            if (btn) {
+                btn.disabled = true;
+                btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Submitting...';
+            }
         });
         
         try {
-            if (this.timerInterval) clearInterval(this.timerInterval);
-            if (this.autoSaveInterval) clearInterval(this.autoSaveInterval);
+            // Clear intervals immediately to prevent race conditions
+            if (this.timerInterval) {
+                clearInterval(this.timerInterval);
+                this.timerInterval = null;
+            }
+            if (this.autoSaveInterval) {
+                clearInterval(this.autoSaveInterval);
+                this.autoSaveInterval = null;
+            }
             
             // Save session with timeout protection
             const savePromise = this.saveSession();
@@ -1110,23 +2212,81 @@ class CATMockTestApp {
                 console.error('Save session failed:', error);
                 this.showToast('Failed to save test progress. Submission cancelled.', 'error');
                 
-                // Re-enable submit button
+                // Re-enable submit button and reset flag
+                this.isSubmitting = false;
                 submitButtons.forEach(btn => {
-                    btn.disabled = false;
-                    btn.innerHTML = '<i class="fas fa-paper-plane"></i> Submit';
+                    if (btn) {
+                        btn.disabled = false;
+                        btn.innerHTML = '<i class="fas fa-paper-plane"></i> Submit';
+                    }
                 });
                 return; // Stop submission if save fails
             }
             
-            // Calculate results
-            this.calculateResults();
-            
-            // Show results page
+            // Show results page FIRST so DOM elements exist before we try to update them
             this.showPage('resultsPage');
+            
+            // Wait for DOM to be ready - use MutationObserver for reliability
+            await this.waitForDOMReady('#resultsPage .results-grid');
+            
+            // Verify all required DOM elements exist before proceeding
+            const requiredElements = ['totalScore', 'varcScore', 'dilrScore', 'qaScore', 'accuracyPercent', 'totalTimeSpent', 'avgTimePerQ'];
+            const missingElements = requiredElements.filter(id => !document.getElementById(id));
+            
+            if (missingElements.length > 0) {
+                throw new Error(`Required DOM elements missing: ${missingElements.join(', ')}. Results page may not have loaded properly.`);
+            }
+            
+            // Calculate results - now DOM elements should exist
+            try {
+                this.calculateResults();
+            } catch (calcError) {
+                console.error('Error calculating results:', calcError);
+                throw new Error(`Failed to calculate results: ${calcError.message}`);
+            }
+            
+            // Mark test as completed on backend
+            if (this.currentSession) {
+                try {
+                    const completeResponse = await fetch('/api/complete-test', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ session_id: this.currentSession })
+                    });
+                    
+                    if (!completeResponse.ok) {
+                        const errorData = await completeResponse.json().catch(() => ({ detail: completeResponse.statusText }));
+                        console.warn('Failed to mark test as completed:', errorData.detail);
+                        // Don't throw - results are already shown, this is just cleanup
+                    }
+                } catch (error) {
+                    console.error('Error marking test as completed:', error);
+                    // Continue anyway - results are shown
+                }
+            }
+            
+            // Show success message
             this.showToast('Test submitted successfully!', 'success');
             
             // Clear current session to prevent confusion with next test
             this.currentSession = null;
+            
+            // Reset submission flag and re-enable buttons (even though page is hidden, reset for future use)
+            this.isSubmitting = false;
+            submitButtons.forEach(btn => {
+                if (btn) {
+                    btn.disabled = false;
+                    btn.innerHTML = '<i class="fas fa-paper-plane"></i> Submit';
+                }
+            });
+            
+            // Also reset any submit buttons that might exist in DOM (in case page navigation happened)
+            document.querySelectorAll('[onclick*="submitTest"]').forEach(btn => {
+                if (btn && btn.disabled) {
+                    btn.disabled = false;
+                    btn.innerHTML = '<i class="fas fa-paper-plane"></i> Submit';
+                }
+            });
             
             // Force refresh progress when test is completed
             setTimeout(() => {
@@ -1136,18 +2296,76 @@ class CATMockTestApp {
             }, 1000);
             
         } catch (error) {
-            console.error('Error submitting test:', error);
-            this.showToast('Error submitting test. Please try again.', 'error');
+            // Comprehensive error logging
+            const errorDetails = {
+                message: error.message,
+                stack: error.stack,
+                name: error.name,
+                currentSession: this.currentSession,
+                sectionQuestions: Object.keys(this.sectionQuestions),
+                answersCount: Object.keys(this.answers).length,
+                timeRemaining: this.timeRemaining,
+                timestamp: new Date().toISOString()
+            };
             
-            // Re-enable submit button
+            console.error('❌ SUBMISSION ERROR:', error);
+            console.error('📋 Error Details:', errorDetails);
+            
+            // Store error in localStorage for debugging
+            try {
+                const errorLog = JSON.parse(localStorage.getItem('submissionErrors') || '[]');
+                errorLog.push({
+                    ...errorDetails,
+                    timestamp: new Date().toISOString()
+                });
+                // Keep only last 5 errors
+                if (errorLog.length > 5) {
+                    errorLog.shift();
+                }
+                localStorage.setItem('submissionErrors', JSON.stringify(errorLog));
+            } catch (e) {
+                console.warn('Could not save error to localStorage:', e);
+            }
+            
+            // Show persistent error message that won't disappear
+            const errorMsg = error.message || 'Unknown error occurred';
+            const detailedError = `Error submitting test: ${errorMsg}\n\nIf this persists, please check the browser console (F12) for details.`;
+            
+            // Show both toast (temporary) and persistent error (requires dismissal)
+            this.showToast(detailedError, 'error', false); // Regular toast for quick view
+            this.showPersistentError(detailedError); // Persistent error that stays until dismissed
+            
+            // Re-enable submit button and reset flag
+            this.isSubmitting = false;
             submitButtons.forEach(btn => {
-                btn.disabled = false;
-                btn.innerHTML = '<i class="fas fa-paper-plane"></i> Submit';
+                if (btn) {
+                    btn.disabled = false;
+                    btn.innerHTML = '<i class="fas fa-paper-plane"></i> Submit';
+                }
+            });
+            
+            // Also reset any submit buttons that might exist in DOM
+            document.querySelectorAll('[onclick*="submitTest"]').forEach(btn => {
+                if (btn && btn.disabled) {
+                    btn.disabled = false;
+                    btn.innerHTML = '<i class="fas fa-paper-plane"></i> Submit';
+                }
             });
         }
     }
 
     calculateResults() {
+        // Validate that sectionQuestions exists and has data
+        if (!this.sectionQuestions || typeof this.sectionQuestions !== 'object') {
+            throw new Error('Section questions data is missing or invalid');
+        }
+        
+        // Validate that answers exists
+        if (!this.answers || typeof this.answers !== 'object') {
+            console.warn('Answers object is missing, initializing empty');
+            this.answers = {};
+        }
+        
         let totalScore = 0;
         let sectionScores = { VARC: 0, DILR: 0, QA: 0 };
         let sectionStats = {
@@ -1160,57 +2378,103 @@ class CATMockTestApp {
         let correctAnswers = 0;
         
         // Calculate detailed stats for each section
-        Object.keys(this.sectionQuestions).forEach(section => {
-            const questions = this.sectionQuestions[section];
-            let sectionMarks = 0;
-            
-            // Set actual total for this section
-            sectionStats[section].total = questions.length;
-            totalQuestions += questions.length;
-            
-            questions.forEach(question => {
-                const userAnswer = this.answers[question.id];
-                
-                // Only count questions that were actually answered (not empty/null)
-                if (userAnswer && userAnswer.trim() !== '') {
-                    sectionStats[section].attempted++;
-                    totalAttempted++;
-                    
-                    if (userAnswer.toLowerCase() === question.answer.toLowerCase()) {
-                        sectionStats[section].correct++;
-                        correctAnswers++;
-                        sectionMarks += 3; // +3 for correct answer
-                    } else if (question.question_type === 'Multiple Choice Question') {
-                        sectionMarks -= 1; // -1 for wrong MCQ answer
-                    }
-                    // TITA wrong answers get 0 marks (no negative marking)
+        try {
+            Object.keys(this.sectionQuestions).forEach(section => {
+                const questions = this.sectionQuestions[section];
+                if (!Array.isArray(questions)) {
+                    console.warn(`Section ${section} questions is not an array`);
+                    return;
                 }
+                
+                let sectionMarks = 0;
+                
+                // Set actual total for this section
+                sectionStats[section].total = questions.length;
+                totalQuestions += questions.length;
+                
+                questions.forEach(question => {
+                    if (!question || !question.id) {
+                        console.warn('Invalid question object in section', section);
+                        return;
+                    }
+                    
+                    const userAnswer = this.answers[question.id];
+                    
+                    // Only count questions that were actually answered (not empty/null)
+                    if (userAnswer && typeof userAnswer === 'string' && userAnswer.trim() !== '') {
+                        sectionStats[section].attempted++;
+                        totalAttempted++;
+                        
+                        // Validate question has answer property
+                        if (question.answer) {
+                            if (userAnswer.toLowerCase().trim() === String(question.answer).toLowerCase().trim()) {
+                                sectionStats[section].correct++;
+                                correctAnswers++;
+                                sectionMarks += 3; // +3 for correct answer
+                            } else if (question.question_type === 'Multiple Choice Question') {
+                                sectionMarks -= 1; // -1 for wrong MCQ answer
+                            }
+                            // TITA wrong answers get 0 marks (no negative marking)
+                        }
+                    }
+                });
+                
+                sectionStats[section].marks = sectionMarks; // Allow negative marks for sections
+                sectionScores[section] = sectionStats[section].marks;
+                totalScore += sectionStats[section].marks;
             });
-            
-            sectionStats[section].marks = sectionMarks; // Allow negative marks for sections
-            sectionScores[section] = sectionStats[section].marks;
-            totalScore += sectionStats[section].marks;
-        });
+        } catch (calcError) {
+            throw new Error(`Error calculating section statistics: ${calcError.message}`);
+        }
         
-        // Update basic results display
-        document.getElementById('totalScore').textContent = totalScore;
-        document.getElementById('varcScore').textContent = `${sectionScores.VARC}/${sectionStats.VARC.total * 3}`;
-        document.getElementById('dilrScore').textContent = `${sectionScores.DILR}/${sectionStats.DILR.total * 3}`;
-        document.getElementById('qaScore').textContent = `${sectionScores.QA}/${sectionStats.QA.total * 3}`;
-        document.getElementById('accuracyPercent').textContent = 
-            `${Math.round((correctAnswers / totalAttempted) * 100)}%`;
+        // Update basic results display - WITH NULL CHECKS to prevent crashes
+        const totalScoreEl = document.getElementById('totalScore');
+        if (totalScoreEl) totalScoreEl.textContent = totalScore;
+        
+        const varcScoreEl = document.getElementById('varcScore');
+        if (varcScoreEl) varcScoreEl.textContent = `${sectionScores.VARC}/${sectionStats.VARC.total * 3}`;
+        
+        const dilrScoreEl = document.getElementById('dilrScore');
+        if (dilrScoreEl) dilrScoreEl.textContent = `${sectionScores.DILR}/${sectionStats.DILR.total * 3}`;
+        
+        const qaScoreEl = document.getElementById('qaScore');
+        if (qaScoreEl) qaScoreEl.textContent = `${sectionScores.QA}/${sectionStats.QA.total * 3}`;
+        
+        // Calculate accuracy safely (avoid division by zero)
+        const accuracyPercent = totalAttempted > 0 
+            ? Math.round((correctAnswers / totalAttempted) * 100) 
+            : 0;
+        const accuracyPercentEl = document.getElementById('accuracyPercent');
+        if (accuracyPercentEl) accuracyPercentEl.textContent = `${accuracyPercent}%`;
         
         // Calculate time spent
         const timeSpent = 7200 - this.timeRemaining;
-        document.getElementById('totalTimeSpent').textContent = this.formatTime(timeSpent);
-        document.getElementById('avgTimePerQ').textContent = 
-            this.formatTime(Math.floor(timeSpent / totalAttempted)).substring(3); // Remove hours
+        const totalTimeSpentEl = document.getElementById('totalTimeSpent');
+        if (totalTimeSpentEl) totalTimeSpentEl.textContent = this.formatTime(timeSpent);
+        
+        // Calculate average time per question safely
+        const avgTimePerQ = totalAttempted > 0 
+            ? Math.floor(timeSpent / totalAttempted) 
+            : 0;
+        // Safe substring - check length first
+        const formattedTime = avgTimePerQ > 0 ? this.formatTime(avgTimePerQ) : '00:00:00';
+        const avgTimePerQEl = document.getElementById('avgTimePerQ');
+        if (avgTimePerQEl) {
+            avgTimePerQEl.textContent = 
+                avgTimePerQ > 0 && formattedTime.length > 3 ? formattedTime.substring(3) : '0:00'; // Remove hours if long enough
+        }
             
-        // Update detailed breakdown
-        this.displayDetailedResults(sectionStats, totalAttempted, correctAnswers, totalScore);
+        // Update detailed breakdown - with error handling
+        try {
+            this.displayDetailedResults(sectionStats, totalAttempted, correctAnswers, totalScore);
+        } catch (displayError) {
+            console.error('Error displaying detailed results:', displayError);
+            // Don't throw - basic results are already shown
+            // Just log the error and continue
+        }
     }
     
-    displayDetailedResults(sectionStats, totalAttempted, correctAnswers, totalScore) {
+    displayDetailedResults(sectionStats, totalAttempted, correctAnswers, totalScore, totalQuestions = 0) {
         // Create detailed breakdown display
         const detailedBreakdown = `
             <div class="detailed-results-breakdown" style="margin: 2rem 0; background: var(--surface-color); padding: 1.5rem; border-radius: var(--border-radius); border-left: 4px solid var(--primary-color);">
@@ -1235,7 +2499,7 @@ class CATMockTestApp {
                             <div style="color: rgba(255, 255, 255, 0.9); font-size: 0.9rem;">Marks Scored</div>
                         </div>
                         <div style="background: rgba(255, 255, 255, 0.15); padding: 0.75rem; border-radius: 6px;">
-                            <div style="font-size: 1.8rem; font-weight: bold; color: white;">${Math.round((correctAnswers/totalAttempted)*100)}%</div>
+                            <div style="font-size: 1.8rem; font-weight: bold; color: white;">${totalAttempted > 0 ? Math.round((correctAnswers/totalAttempted)*100) : 0}%</div>
                             <div style="color: rgba(255, 255, 255, 0.9); font-size: 0.9rem;">Accuracy</div>
                         </div>
                     </div>
@@ -1252,13 +2516,13 @@ class CATMockTestApp {
                         const maxMarks = stats.total * 3;
                         
                         return `
-                        <div style="background: white; border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem;">
+                        <div style="background: var(--surface-color); border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem;">
                             <h5 style="color: var(--primary-color); margin: 0 0 1rem 0; text-align: center;">${sectionName}</h5>
-                            <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.5rem; font-size: 0.9rem;">
-                                <div><strong>Total Questions:</strong> ${stats.total}</div>
-                                <div><strong>Attempted:</strong> ${stats.attempted}</div>
-                                <div><strong>Correct:</strong> ${stats.correct}</div>
-                                <div><strong>Accuracy:</strong> ${accuracy}%</div>
+                            <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.5rem; font-size: 0.9rem; color: var(--text-primary);">
+                                <div><strong style="color: var(--text-primary);">Total Questions:</strong> ${stats.total}</div>
+                                <div><strong style="color: var(--text-primary);">Attempted:</strong> ${stats.attempted}</div>
+                                <div><strong style="color: var(--text-primary);">Correct:</strong> ${stats.correct}</div>
+                                <div><strong style="color: var(--text-primary);">Accuracy:</strong> ${accuracy}%</div>
                                 <div style="grid-column: span 2; margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px solid var(--border-color);">
                                     <strong style="color: var(--primary-color);">Marks: ${stats.marks}/${maxMarks}</strong>
                                 </div>
@@ -1269,7 +2533,7 @@ class CATMockTestApp {
                 </div>
                 
                 <!-- Answered Questions Table -->
-                <div style="margin-top: 1.5rem; background: white; border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem;">
+                <div style="margin-top: 1.5rem; background: var(--surface-color); border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem;">
                     <h4 style="color: var(--primary-color); margin: 0 0 1rem 0;">
                         <i class="fas fa-list-alt"></i> Answered Questions Details
                     </h4>
@@ -1280,16 +2544,31 @@ class CATMockTestApp {
             </div>
         `;
         
-        // Insert after the results grid
+        // Insert after the results grid - WITH NULL CHECK to prevent crashes
         const resultsGrid = document.querySelector('.results-grid');
+        if (!resultsGrid) {
+            console.error('Results grid not found - cannot display detailed results');
+            return; // Exit early if results grid doesn't exist
+        }
+        
         let existingBreakdown = document.querySelector('.detailed-results-breakdown');
         if (existingBreakdown) {
             existingBreakdown.remove();
         }
         resultsGrid.insertAdjacentHTML('afterend', detailedBreakdown);
         
-        // Populate the answered questions table
-        this.displayAnsweredQuestionsTable();
+        // Populate the answered questions table - with error handling
+        try {
+            this.displayAnsweredQuestionsTable();
+        } catch (tableError) {
+            console.error('Error displaying answered questions table:', tableError);
+            // Show error in the table container if it exists
+            const tableContainer = document.getElementById('answeredQuestionsTable');
+            if (tableContainer) {
+                tableContainer.innerHTML = `<div style="color: var(--danger-color); padding: 1rem;">Error loading answered questions table: ${tableError.message}</div>`;
+            }
+            // Don't throw - basic results are already shown
+        }
     }
 
     displayAnsweredQuestionsTable() {
@@ -1303,9 +2582,14 @@ class CATMockTestApp {
         Object.keys(this.answers).forEach(questionId => {
             const answer = this.answers[questionId];
             // Strict check: only include questions with actual non-empty answers
-            if (!answer || answer.trim() === '' || answer === null || answer === undefined) {
+            // Handle both string and non-string types safely
+            const answerStr = typeof answer === 'string' ? answer : String(answer || '');
+            if (!answerStr || answerStr.trim() === '' || answerStr === 'null' || answerStr === 'undefined' || answerStr === 'NaN') {
                 return; // Skip unanswered questions
             }
+            
+            // Use normalized answer for processing
+            const normalizedAnswer = answerStr.trim();
             
             // Find the question data
             let questionData = null;
@@ -1321,24 +2605,67 @@ class CATMockTestApp {
             }
             
             if (questionData) {
-                const isCorrect = answer.toLowerCase() === questionData.answer.toLowerCase();
+                // Normalize both answers for comparison - handle both numeric and alphabetic formats
+                const normalizedUserAnswer = normalizedAnswer.toLowerCase();
+                const normalizedCorrectAnswer = String(questionData.answer || '').trim().toLowerCase();
+                // Also handle numeric comparison (e.g., "1" === "1")
+                const isCorrect = normalizedUserAnswer === normalizedCorrectAnswer ||
+                                 normalizedAnswer === String(questionData.answer || '').trim();
                 const marks = isCorrect ? 3 : (questionData.question_type === 'Multiple Choice Question' ? -1 : 0);
+                
+                // Safe substring for question text
+                const questionText = this.cleanHtmlText(questionData.question || '');
+                const displayText = questionText.length > 100 ? questionText.substring(0, 100) + '...' : questionText;
+                
+                // Format answer display based on question type
+                let userAnswerDisplay = normalizedAnswer;
+                let correctAnswerDisplay = String(questionData.answer || '');
+                
+                // For MCQ, show option numbers (a, b, c, d)
+                if (questionData.question_type === 'Multiple Choice Question' && questionData.options) {
+                    const userAnswerLower = normalizedAnswer.toLowerCase();
+                    const correctAnswerLower = String(questionData.answer || '').toLowerCase().trim();
+                    
+                    // Convert answer letter (a, b, c, d) to Option A, B, C, D
+                    if (userAnswerLower && userAnswerLower.length === 1 && userAnswerLower >= 'a' && userAnswerLower <= 'z') {
+                        const optionLetter = userAnswerLower.toUpperCase();
+                        userAnswerDisplay = `Option ${optionLetter}`;
+                        if (isCorrect) {
+                            userAnswerDisplay += ' (Your Choice & Correct)';
+                        } else {
+                            userAnswerDisplay += ' (Your Choice)';
+                        }
+                    }
+                    
+                    if (correctAnswerLower && correctAnswerLower.length === 1 && correctAnswerLower >= 'a' && correctAnswerLower <= 'z') {
+                        const optionLetter = correctAnswerLower.toUpperCase();
+                        correctAnswerDisplay = `Option ${optionLetter}`;
+                        if (!isCorrect) {
+                            correctAnswerDisplay += ' (Correct Answer)';
+                        }
+                    }
+                }
+                // For TITA, just show the value (answer is already stored as the numeric value)
                 
                 answeredQuestions.push({
                     questionId: questionId,
                     section: section,
-                    questionText: this.cleanHtmlText(questionData.question).substring(0, 100) + '...',
-                    userAnswer: answer,
+                    questionNumber: questionData.number || '',
+                    questionText: displayText,
+                    userAnswer: normalizedAnswer, // Use normalized answer (from this.answers) to ensure consistency
+                    userAnswerDisplay: userAnswerDisplay,
                     correctAnswer: questionData.answer,
+                    correctAnswerDisplay: correctAnswerDisplay,
                     isCorrect: isCorrect,
                     marks: marks,
-                    questionType: questionData.question_type
+                    questionType: questionData.question_type,
+                    options: questionData.options || []
                 });
             }
         });
 
         if (answeredQuestions.length === 0) {
-            tableContainer.innerHTML = '<p style="text-align: center; color: #718096; font-style: italic; padding: 2rem;">No questions were answered in this test.</p>';
+            tableContainer.innerHTML = '<p style="text-align: center; color: var(--text-secondary); font-style: italic; padding: 2rem;">No questions were answered in this test.</p>';
             return;
         }
 
@@ -1352,6 +2679,7 @@ class CATMockTestApp {
                 <table style="width: 100%; border-collapse: collapse;">
                     <thead>
                         <tr style="background: var(--primary-color); color: white;">
+                            <th style="padding: 12px; text-align: center; font-weight: bold; border-right: 1px solid rgba(255,255,255,0.2);">Question #</th>
                             <th style="padding: 12px; text-align: left; font-weight: bold; border-right: 1px solid rgba(255,255,255,0.2);">Section</th>
                             <th style="padding: 12px; text-align: left; font-weight: bold; border-right: 1px solid rgba(255,255,255,0.2);">Question (Preview)</th>
                             <th style="padding: 12px; text-align: center; font-weight: bold; border-right: 1px solid rgba(255,255,255,0.2);">Your Answer</th>
@@ -1362,25 +2690,28 @@ class CATMockTestApp {
                     </thead>
                     <tbody>
                         ${answeredQuestions.map((q, index) => {
-                            const rowBg = index % 2 === 0 ? 'var(--surface-color)' : 'white';
+                            const rowBg = index % 2 === 0 ? 'var(--surface-color)' : 'var(--background-color)';
                             const statusIcon = q.isCorrect ? '✅' : '❌';
                             const statusText = q.isCorrect ? 'Correct' : 'Incorrect';
-                            const statusColor = q.isCorrect ? '#10b981' : '#ef4444';
-                            const marksColor = q.marks > 0 ? '#10b981' : q.marks < 0 ? '#ef4444' : '#6b7280';
+                            const statusColor = q.isCorrect ? 'var(--success-color)' : 'var(--danger-color)';
+                            const marksColor = q.marks > 0 ? 'var(--success-color)' : q.marks < 0 ? 'var(--danger-color)' : 'var(--text-secondary)';
                             
                             return `
                                 <tr style="background: ${rowBg}; border-bottom: 1px solid var(--border-color);">
+                                    <td style="padding: 12px; text-align: center; border-right: 1px solid var(--border-color); vertical-align: top;">
+                                        <span style="background: var(--primary-color); color: white; padding: 6px 10px; border-radius: 6px; font-weight: bold; font-size: 1rem;">${this.escapeHtml(String(q.questionNumber || ''))}</span>
+                                    </td>
                                     <td style="padding: 12px; border-right: 1px solid var(--border-color); vertical-align: top;">
-                                        <span style="background: var(--primary-color); color: white; padding: 4px 8px; border-radius: 4px; font-size: 0.8rem; font-weight: bold;">${q.section}</span>
+                                        <span style="background: var(--secondary-color); color: white; padding: 4px 8px; border-radius: 4px; font-size: 0.8rem; font-weight: bold;">${this.escapeHtml(q.section || '')}</span>
                                     </td>
-                                    <td style="padding: 12px; border-right: 1px solid var(--border-color); max-width: 300px; color: var(--text-color); font-size: 0.9rem; vertical-align: top;">
-                                        ${q.questionText}
-                                    </td>
-                                    <td style="padding: 12px; text-align: center; border-right: 1px solid var(--border-color); vertical-align: top;">
-                                        <span style="background: #dbeafe; color: #1d4ed8; padding: 6px 12px; border-radius: 6px; font-weight: bold; font-size: 1rem;">${q.userAnswer.toUpperCase()}</span>
+                                    <td style="padding: 12px; border-right: 1px solid var(--border-color); max-width: 300px; color: var(--text-primary); font-size: 0.9rem; vertical-align: top;">
+                                        ${this.escapeHtml(q.questionText || '')}
                                     </td>
                                     <td style="padding: 12px; text-align: center; border-right: 1px solid var(--border-color); vertical-align: top;">
-                                        <span style="background: #dcfce7; color: #16a34a; padding: 6px 12px; border-radius: 6px; font-weight: bold; font-size: 1rem;">${q.correctAnswer.toUpperCase()}</span>
+                                        <span class="answer-badge-user" style="background: #dbeafe; color: #1d4ed8; padding: 6px 12px; border-radius: 6px; font-weight: bold; font-size: 0.9rem;">${this.escapeHtml(q.userAnswerDisplay || q.userAnswer || '').toUpperCase()}</span>
+                                    </td>
+                                    <td style="padding: 12px; text-align: center; border-right: 1px solid var(--border-color); vertical-align: top;">
+                                        <span class="answer-badge-correct" style="background: #dcfce7; color: #16a34a; padding: 6px 12px; border-radius: 6px; font-weight: bold; font-size: 0.9rem;">${this.escapeHtml(q.correctAnswerDisplay || q.correctAnswer || '').toUpperCase()}</span>
                                     </td>
                                     <td style="padding: 12px; text-align: center; border-right: 1px solid var(--border-color); vertical-align: top;">
                                         <div style="display: flex; align-items: center; justify-content: center; gap: 0.5rem; color: ${statusColor};">
@@ -1406,10 +2737,70 @@ class CATMockTestApp {
     }
 
     cleanHtmlText(html) {
+        // Handle null/undefined
+        if (!html) return '';
         // Create a temporary element to strip HTML tags
         const temp = document.createElement('div');
         temp.innerHTML = html;
         return temp.textContent || temp.innerText || '';
+    }
+
+    /**
+     * Extract the option letter/number from an HTML-formatted answer.
+     * Handles formats like "<p>b) text...</p>" -> "b"
+     * or "<p>1) text...</p>" -> "1"
+     * For MCQ questions, returns just the letter/number.
+     * For TITA questions, returns the cleaned text.
+     */
+    extractAnswerFromHtml(htmlAnswer, questionType) {
+        if (!htmlAnswer) return '';
+        
+        // For TITA questions, return cleaned text without option extraction
+        if (questionType === 'Type in the Answer' || questionType === 'TITA') {
+            return this.cleanHtmlText(htmlAnswer).trim();
+        }
+        
+        // For MCQ, extract option letter/number
+        const cleaned = this.cleanHtmlText(htmlAnswer).trim();
+        
+        // Match pattern like "b) text" or "1) text" - extract the letter/number before )
+        const match = cleaned.match(/^([a-zA-Z0-9]+)\)\s*/);
+        if (match) {
+            return match[1].toLowerCase(); // Return lowercase letter or number as string
+        }
+        
+        // Fallback: if it's just a single letter/number, return it
+        if (cleaned.length === 1 && /[a-zA-Z0-9]/.test(cleaned)) {
+            return cleaned.toLowerCase();
+        }
+        
+        // If no match, return cleaned text (shouldn't happen for MCQ, but safe fallback)
+        return cleaned;
+    }
+
+    // Escape HTML to prevent XSS
+    escapeHtml(text) {
+        if (text === null || text === undefined) {
+            return '';
+        }
+        const div = document.createElement('div');
+        div.textContent = String(text);
+        return div.innerHTML;
+    }
+
+    // Safe JSON parsing helper - checks content-type and handles errors
+    async safeJsonParse(response) {
+        try {
+            const contentType = response.headers.get('content-type');
+            if (!contentType || !contentType.includes('application/json')) {
+                const text = await response.text();
+                throw new Error(text || `Server returned ${response.status}: ${response.statusText}`);
+            }
+            return await response.json();
+        } catch (parseError) {
+            console.error('Error parsing JSON response:', parseError);
+            throw new Error(parseError.message || 'Invalid response format from server');
+        }
     }
 
     // Results and AI Functions
@@ -1432,7 +2823,7 @@ class CATMockTestApp {
                 throw new Error(`HTTP ${response.status}: ${response.statusText}`);
             }
             
-            const analysisData = await response.json();
+            const analysisData = await this.safeJsonParse(response);
             
             if (analysisData.status === 'unavailable') {
                 document.querySelector('.analysis-content').innerHTML = `
@@ -1440,7 +2831,7 @@ class CATMockTestApp {
                         <div style="text-align: center; margin-bottom: 2rem;">
                             <i class="fas fa-exclamation-triangle" style="font-size: 3rem; color: var(--warning-color); margin-bottom: 1rem;"></i>
                             <h3>AI Analysis Unavailable</h3>
-                            <p>${analysisData.message}</p>
+                            <p>${this.escapeHtml(analysisData.message || '')}</p>
                         </div>
                         <div style="background: var(--surface-color); padding: 1.5rem; border-radius: var(--border-radius); border-left: 4px solid var(--primary-color);">
                             <h4>📊 Basic Performance Summary Available</h4>
@@ -1501,7 +2892,7 @@ class CATMockTestApp {
                 <div style="text-align: center; padding: 2rem;">
                     <i class="fas fa-exclamation-circle" style="font-size: 3rem; color: var(--danger-color); margin-bottom: 1rem;"></i>
                     <h3>Analysis Generation Failed</h3>
-                    <p>Error: ${error.message}</p>
+                    <p>Error: ${this.escapeHtml(error.message || 'Unknown error')}</p>
                     <p>Please try again later or check your connection.</p>
                     <button onclick="app.generateAIAnalysis()" class="btn btn-primary" style="margin-top: 1rem;">
                         <i class="fas fa-retry"></i> Retry Analysis
@@ -1545,8 +2936,12 @@ class CATMockTestApp {
     }
     
     formatAnalysisText(text) {
+        // First escape the text to prevent XSS, then convert markdown to HTML
+        // This ensures that any existing HTML in the text is escaped first
+        const escaped = this.escapeHtml(text);
+        
         // Convert markdown-style formatting to HTML
-        return text
+        return escaped
             .replace(/## (.*?)$/gm, '<h4 style="color: var(--primary-color); margin: 1.5rem 0 0.5rem 0;">$1</h4>')
             .replace(/### (.*?)$/gm, '<h5 style="color: var(--text-color); margin: 1rem 0 0.5rem 0;">$1</h5>')
             .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
@@ -1569,26 +2964,50 @@ class CATMockTestApp {
         if (!this.currentUser) return;
         
         try {
-            const response = await fetch(`/api/user-progress/${this.currentUser.username}`);
+            this.showLoading();
             
-            if (response.ok) {
-                const blob = await response.blob();
-                const url = window.URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = `${this.currentUser.username}_progress.xlsx`;
-                document.body.appendChild(a);
-                a.click();
-                document.body.removeChild(a);
-                window.URL.revokeObjectURL(url);
-                
-                this.showToast('Progress report downloaded successfully!', 'success');
-            } else {
-                this.showToast('No progress data available', 'info');
+            // Download comprehensive PDF report from backend
+            const response = await fetch(`/api/download-report/${this.currentUser.username}`, {
+                method: 'GET'
+            });
+            
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
             }
+            
+            // Get PDF blob
+            const blob = await response.blob();
+            const url = window.URL.createObjectURL(blob);
+            
+            // Create download link
+            const a = document.createElement('a');
+            a.style.display = 'none';
+            a.href = url;
+            
+            // Get filename from response headers or use default
+            const contentDisposition = response.headers.get('content-disposition');
+            let filename = `CAT_Progress_Report_${this.currentUser.username}_${new Date().toISOString().split('T')[0]}.pdf`;
+            
+            if (contentDisposition) {
+                const filenameMatch = contentDisposition.match(/filename=([^;]+)/);
+                if (filenameMatch) {
+                    filename = filenameMatch[1].replace(/['"]/g, '');
+                }
+            }
+            
+            a.download = filename;
+            
+            document.body.appendChild(a);
+            a.click();
+            window.URL.revokeObjectURL(url);
+            document.body.removeChild(a);
+            
+            this.showToast('Progress PDF report downloaded successfully!', 'success');
         } catch (error) {
-            console.error('Error downloading progress:', error);
-            this.showToast('Failed to download progress report', 'error');
+            console.error('Error downloading PDF report:', error);
+            this.showToast(`Failed to download PDF report: ${error.message}`, 'error');
+        } finally {
+            this.hideLoading();
         }
     }
 
@@ -1687,7 +3106,10 @@ class CATMockTestApp {
         csv += `Total Marks,${Math.max(0, totalMarks)}/198\\n`;
         csv += `Accuracy,${totalAttempted > 0 ? (totalCorrect/totalAttempted*100).toFixed(1) : 0}%\\n`;
         csv += `Time Taken,${timeFormatted}\\n`;
-        csv += `Average Time per Question,${totalAttempted > 0 ? this.formatTime(Math.floor(timeSpent/totalAttempted)).substring(3) : 'N/A'}\\n`;
+        // Safe substring for average time
+        const avgTimeStr = totalAttempted > 0 ? this.formatTime(Math.floor(timeSpent/totalAttempted)) : '00:00:00';
+        const avgTimeDisplay = avgTimeStr.length > 3 ? avgTimeStr.substring(3) : 'N/A';
+        csv += `Average Time per Question,${totalAttempted > 0 ? avgTimeDisplay : 'N/A'}\\n`;
         csv += "\\n";
         
         csv += "Section-wise Performance\\n";
@@ -1773,7 +3195,7 @@ class CATMockTestApp {
                 throw new Error(`HTTP ${response.status}: ${response.statusText}`);
             }
             
-            const followupData = await response.json();
+            const followupData = await this.safeJsonParse(response);
             
             // Display the follow-up response
             this.displayFollowupResponse(question, followupData.response);
@@ -1847,7 +3269,12 @@ class CATMockTestApp {
             });
 
             if (!response.ok) {
-                const errorData = await response.json();
+                let errorData;
+                try {
+                    errorData = await this.safeJsonParse(response);
+                } catch {
+                    errorData = { detail: 'Failed to resume test' };
+                }
                 throw new Error(errorData.detail || 'Failed to resume test');
             }
 
@@ -1857,7 +3284,7 @@ class CATMockTestApp {
                 throw new Error('Failed to load session data');
             }
 
-            const sessionData = await sessionResponse.json();
+            const sessionData = await this.safeJsonParse(sessionResponse);
             
             // Load test data
             const testResponse = await fetch(`/api/test-data/${sessionData.test_name}`);
@@ -1865,7 +3292,7 @@ class CATMockTestApp {
                 throw new Error('Failed to load test data');
             }
             
-            this.testData = await testResponse.json();
+            this.testData = await this.safeJsonParse(testResponse);
             this.currentSession = sessionId;
             
             // Restore test state
@@ -1901,12 +3328,38 @@ class CATMockTestApp {
         const backendAnswers = sessionData.answers || {};
         for (const questionId in backendAnswers) {
             const answerData = backendAnswers[questionId];
-            this.answers[questionId] = answerData.answer || answerData;
+            const answer = answerData.answer || answerData;
+            // Normalize answer - preserve numeric format, lowercase alphabetic
+            if (answer && typeof answer !== 'undefined' && answer !== null) {
+                const answerStr = String(answer).trim();
+                if (/^\d+$/.test(answerStr)) {
+                    // Numeric option: keep as string
+                    this.answers[questionId] = answerStr;
+                } else if (answerStr.length === 1 && /[a-zA-Z]/.test(answerStr)) {
+                    // Single letter option: lowercase
+                    this.answers[questionId] = answerStr.toLowerCase();
+                } else {
+                    // TITA or other format: keep as-is
+                    this.answers[questionId] = answerStr;
+                }
+            }
         }
         
         this.bookmarks = sessionData.bookmarks || [];
         this.flags = sessionData.flags || {};
-        this.timeRemaining = sessionData.time_remaining;
+        // Ensure time_remaining is never negative
+        this.timeRemaining = Math.max(0, sessionData.time_remaining || 7200);
+        
+        // If time has expired, show warning and prepare for auto-submit
+        if (this.timeRemaining <= 0) {
+            this.showToast('⚠️ Test time has expired. Submitting automatically...', 'warning');
+            // Auto-submit after a short delay
+            setTimeout(() => {
+                if (!this.isSubmitting && this.currentSession) {
+                    this.submitTest();
+                }
+            }, 2000);
+        }
         
         // Flatten questions for easy navigation
         this.sectionQuestions = {
@@ -1977,6 +3430,10 @@ function submitTest() {
 
 function switchSection(section) {
     app.switchSection(section);
+}
+
+function toggleDarkMode() {
+    app.toggleDarkMode();
 }
 
 function previousQuestion() {
